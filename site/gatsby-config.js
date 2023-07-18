@@ -1,21 +1,24 @@
 module.exports = {
   plugins: [
     {
+      resolve: 'gatsby-plugin-netlify-cms',
+      options: {}
+    },
+    {
       resolve: '@elegantstack/gatsby-theme-flexiblog-science',
       options: {
         // Add theme options here. Check documentation for available options.
-        siteUrl: process.env.URL || process.env.VERCEL_URL
+        siteUrl: process.env.URL || process.env.VERCEL_URL,
+        sources: {
+          local: true
+        }
       }
-    },
-    {
-      resolve: 'gatsby-plugin-netlify-cms',
-      options: {}
     }
   ],
   siteMetadata: {
     //General Site Metadata
-    title: 'FlexiBlog Theme',
-    name: 'FlexiBlog',
+    title: 'SalesforceNick Blog',
+    name: 'SalesforceNick',
     description: 'My site description...',
     address: 'New York, NY',
     email: 'email@example.com',

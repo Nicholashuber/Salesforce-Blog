@@ -10,7 +10,8 @@
 
   backend: {
       name: 'github', # Name of your git hosting service (ie. github, gitlab)
-      repo: 'Nicholashuber/Salesforce-Blog', # Path to your GitHub repository
+      repo: 'nicholashuber/salesforce-blog', # Path to your GitHub repository
+      branch: 'main'
     },
 
   #########################################################################
