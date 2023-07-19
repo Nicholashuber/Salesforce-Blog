@@ -23,6 +23,55 @@ const Posts = ({ data: { paginatedPosts = {} }, ...props }) => {
       <Hero sx={{ bg: `contentBg` }}>
         <HeroComponent {...props} />
       </Hero>
+      <Hero
+        pt={4}
+        pb={5}
+        sx={{
+          background: t =>
+            `linear-gradient(
+              0deg,
+              ${t.colors.omegaLighter},
+              ${t.colors.background}
+            )`
+        }}
+      >
+        <Divider space={3} />
+        <Box sx={{ position: `relative`, zIndex: 3 }}>
+          <Box sx={{ display: [`none`, `block`] }}>
+            <Categories
+              categories={categories}
+              variant='horizontal'
+              omitTitle
+            />
+            <Divider />
+          </Box>
+          <CardList
+            nodes={featuredPosts.nodes}
+            variant={['horizontal-hero']}
+            limit={3}
+            omitFooter
+            slider
+            autoPlay
+            fade
+            arrows={false}
+            controlPosition='bottom'
+            ref={sliderRef}
+            loading='eager'
+          />
+          <Box sx={{ display: [`none`, null, `block`] }}>
+            <Divider />
+            <CardList
+              nodes={featuredPosts.nodes}
+              variant={['horizontal-md', 'horizontal-aside']}
+              limit={3}
+              columns={[1, 0, 3]}
+              omitCategory
+              asNavFor={sliderRef}
+              loading='eager'
+            />
+          </Box>
+        </Box>
+      </Hero>
       <Divider />
       <Stack>
         <Main>

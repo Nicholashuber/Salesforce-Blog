@@ -17,7 +17,7 @@ const styles = {
   },
   rightColumn: {
     display: [`none`, null, `block`],
-    flexBasis: `1/2`
+    flexBasis: `1/3`
   }
 }
 

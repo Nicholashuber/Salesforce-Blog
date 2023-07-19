@@ -17,8 +17,8 @@ module.exports = {
   ],
   siteMetadata: {
     //General Site Metadata
-    title: 'SalesforceNick Blog',
-    name: 'SalesforceNick',
+    title: 'SalesforceStack Blog',
+    name: 'SalesforceStack',
     description: 'My site description...',
     address: 'New York, NY',
     email: 'email@example.com',

@@ -6,7 +6,6 @@ import Divider from '@components/Divider'
 import Seo from '@widgets/Seo'
 import Categories from '@widgets/Categories'
 import NewsletterExpanded from '@widgets/NewsletterExpanded'
-import HeroComponent from '../components/Hero/Hero'
 import { useBlogCategories } from '@helpers-blog'
 
 const Posts = ({
@@ -20,28 +19,6 @@ const Posts = ({
   return (
     <Layout {...props}>
       <Seo title='Home' />
-      <div id="ayo777" style={{
-      backgroundImage: `url("https://i.imgur.com/OXzUGFn.png")`,
-      backgroundSize: `100% 740px`,
-      backgroundRepeat: `no-repeat`,
-    }}>
-      <Hero sx={{ bg: `` }}>
-        <HeroComponent {...props} />
-      </Hero>
-      <div class="banner-white-shape"
-      style={{
-        display: `none`,
-        position: `absolute`,
-        left: `0`,
-        bottom: `66px`,
-        width: `100%`,
-        zindex: `1`,
-        height: `112.7%`,
-      }}>
-        <img src="https://i.imgur.com/KloMjnY.png" alt="image"/>
-        </div>
-      </div>
-
       <Hero
         pt={4}
         pb={5}

@@ -43,7 +43,15 @@ export const Header = ({ children }) => {
   const algolia = services && services.algolia
 
   return (
-    <Box sx={styles.wrapper}>
+    <Box id="ay782" style={{
+      position: `absolute`,
+      left: `0`,
+      top: `0`,
+      zIndex: `999`,
+      width: `100%`,
+      height: `auto`,
+      backgroundColor: `transparent`,
+                }} sx={styles.wrapper}>
       <Container variant='compact' sx={styles.container}>
         <Flex variant='layout.header'>
           <Box sx={styles.logoContainer}>
