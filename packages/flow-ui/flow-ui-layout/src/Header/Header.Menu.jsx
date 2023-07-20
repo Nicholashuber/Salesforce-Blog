@@ -25,15 +25,15 @@ export const HeaderMenu = ({ mobileMenu = {} }) => {
   const styles = generateStyles(isHomePage);
 
   useEffect(() => {
-    const checkIsHomePage = () => {
-      const isHome =
-        typeof window !== 'undefined' && window.location.pathname === '/'; // Check if window object is available and the current URL is the home page
-      setIsHomePage(isHome);
-    };
-
-    checkIsHomePage(); // Call the function initially
-
     if (typeof window !== 'undefined') {
+      const checkIsHomePage = () => {
+        const currentUrl = window.location.pathname;
+        const isHome = currentUrl === '/'; // Adjust this condition based on your home page URL
+        setIsHomePage(isHome);
+      };
+
+      checkIsHomePage(); // Call the function initially
+
       const handleRouteChange = () => {
         checkIsHomePage();
       };
