@@ -21,15 +21,15 @@ module.exports = {
     social: [
       {
         name: 'Github',
-        url: 'https://github.com/gatsbyjs'
+        url: 'https://github.com/Nicholashuber'
       },
       {
         name: 'Twitter',
-        url: 'https://twitter.com/gatsbyjs'
+        url: '#'
       },
       {
         name: 'Instagram',
-        url: 'https://github.com/gatsbyjs'
+        url: '#'
       }
     ],
 
