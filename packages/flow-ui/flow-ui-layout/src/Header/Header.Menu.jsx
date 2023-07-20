@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Box } from 'theme-ui';
 import Navigation from '@components/Navigation';
 import Drawer from '@components/Drawer';
+import { useLocation } from '@reach/router'; // Import useLocation hook from reach/router
 import useSiteMetadata from '@helpers-blog/useSiteMetadata';
 
 const generateStyles = (isHomePage) => ({
@@ -23,32 +24,13 @@ export const HeaderMenu = ({ mobileMenu = {} }) => {
   const { headerMenu } = useSiteMetadata();
   const [isHomePage, setIsHomePage] = useState(true);
   const styles = generateStyles(isHomePage);
+  const location = useLocation(); // Get the current location
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const checkIsHomePage = () => {
-        const currentUrl = window.location.pathname;
-        const isHome = currentUrl === '/'; // Adjust this condition based on your home page URL
-        setIsHomePage(isHome);
-      };
-
-      checkIsHomePage(); // Call the function initially
-
-      const handleRouteChange = () => {
-        checkIsHomePage();
-      };
-
-      window.addEventListener('popstate', handleRouteChange);
-
-      return () => {
-        window.removeEventListener('popstate', handleRouteChange);
-      };
-    }
-  }, []);
-
-  if (typeof window === 'undefined') {
-    return null; // Return null during server-side rendering
-  }
+    const currentUrl = location.pathname; // Get the current URL from location object
+    const isHome = currentUrl === '/'; // Adjust this condition based on your home page URL
+    setIsHomePage(isHome);
+  }, [location]);
 
   const desktopMenuNav = (
     <Navigation
