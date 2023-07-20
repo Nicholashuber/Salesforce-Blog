@@ -32,6 +32,15 @@ const styles = {
   colorModeContainer: {
     minWidth: `auto`,
     order: [2, null, `unset`]
+  },
+  ayo777j: {
+    position: `absolute`,
+    left: `0`,
+    top: `0`,
+    zIndex: `999`,
+    width: `100%`,
+    height: `auto`,
+    backgroundColor: `transparent`,
   }
 }
 
@@ -41,17 +50,23 @@ export const Header = ({ children }) => {
   const { services, mobileMenu, darkMode } = context.pageContext
 
   const algolia = services && services.algolia
+  console.log('context.pageContext');
+  console.log(context.pageContext);
+
+  const isHomePage = window.location.pathname == '/'; // Update this with your home page URL or logic
+  console.log('isHomePage');
+  console.log(isHomePage);
 
   return (
-    <Box id="ay782" style={{
-      position: `absolute`,
-      left: `0`,
-      top: `0`,
-      zIndex: `999`,
-      width: `100%`,
-      height: `auto`,
-      backgroundColor: `transparent`,
-                }} sx={styles.wrapper}>
+    <Box id="ay782" style={isHomePage ? {
+      position: 'absolute',
+      left: '0',
+      top: '0',
+      zIndex: '999',
+      width: '100%',
+      height: 'auto',
+      backgroundColor: 'transparent',
+    } : null} sx={styles.wrapper}>
       <Container variant='compact' sx={styles.container}>
         <Flex variant='layout.header'>
           <Box sx={styles.logoContainer}>

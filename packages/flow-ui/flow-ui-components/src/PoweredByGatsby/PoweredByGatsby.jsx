@@ -28,9 +28,8 @@ const PoweredByGatsby = () => (
     rel='noopener'
     sx={styles.link}
   >
-    Powered By
-    {gatsbySVG && <SVG src={gatsbySVG} />}
-  </Link>
+    Made with ❤️
+</Link>
 )
 
 export default PoweredByGatsby

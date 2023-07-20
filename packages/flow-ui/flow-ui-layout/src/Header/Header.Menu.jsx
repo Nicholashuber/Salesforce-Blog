@@ -1,52 +1,83 @@
-import React from 'react'
-import { Box } from 'theme-ui'
-import Navigation from '@components/Navigation'
-import Drawer from '@components/Drawer'
-import useSiteMetadata from '@helpers-blog/useSiteMetadata'
+import React, { useState, useEffect } from 'react';
+import { Box } from 'theme-ui';
+import Navigation from '@components/Navigation';
+import Drawer from '@components/Drawer';
+import useSiteMetadata from '@helpers-blog/useSiteMetadata';
 
-const styles = {
+const generateStyles = (isHomePage) => ({
   desktopMenu: {
-    display: [`none`, null, `block`]
+    display: ['none', null, 'block'],
+    a: {
+      color: isHomePage ? 'white !important' : 'unset',
+    },
   },
   mobileMenu: {
-    display: [`block`, null, `none`]
+    display: ['block', null, 'none'],
   },
   desktopMenuWrapper: {
-    justifyContent: 'flex-end'
-  }
-}
+    justifyContent: 'flex-end',
+  },
+});
 
 export const HeaderMenu = ({ mobileMenu = {} }) => {
-  const { headerMenu } = useSiteMetadata()
+  const { headerMenu } = useSiteMetadata();
+  const [isHomePage, setIsHomePage] = useState(true);
+  const styles = generateStyles(isHomePage);
+
+  useEffect(() => {
+    // Replace this with your logic to determine if it's the home page or not
+    const checkIsHomePage = () => {
+      const currentUrl = window.location.pathname; // Get the current URL
+      const isHome = currentUrl === '/'; // Adjust this condition based on your home page URL
+
+      setIsHomePage(isHome);
+    };
+
+    checkIsHomePage(); // Call the function initially
+
+    // Attach an event listener to check the home page on route changes
+    const handleRouteChange = () => {
+      checkIsHomePage();
+    };
+
+    // Add event listener to route changes
+    window.addEventListener('popstate', handleRouteChange);
+
+    return () => {
+      // Cleanup the event listener on component unmount
+      window.removeEventListener('popstate', handleRouteChange);
+    };
+  }, []);
 
   const desktopMenuNav = (
     <Navigation
-      variant='horizontal'
+      variant="horizontal"
       items={headerMenu}
       wrapperStyle={styles.desktopMenuWrapper}
+      sx={styles.desktopMenu}
     />
-  )
+  );
 
   const mobileMenuNav = (
     <Drawer>
       <Navigation
-        variant='vertical'
+        variant="vertical"
         headingProps={{ variant: 'h3' }}
         items={[
           {
             title: 'Main Menu',
-            items: headerMenu
+            items: headerMenu,
           },
-          mobileMenu
+          mobileMenu,
         ]}
       />
     </Drawer>
-  )
+  );
 
   return (
     <>
       <Box sx={styles.desktopMenu}>{desktopMenuNav}</Box>
       <Box sx={styles.mobileMenu}>{mobileMenuNav}</Box>
     </>
-  )
-}
+  );
+};
