@@ -5,6 +5,8 @@ import Search from '@widgets/Search'
 import { HeaderLogo } from './Header.Logo'
 import { HeaderMenu } from './Header.Menu'
 import { HeaderColorMode } from './Header.ColorMode'
+import { useLocation } from '@reach/router'; // Import useLocation hook from reach/router
+
 
 const styles = {
   wrapper: {
@@ -52,8 +54,7 @@ export const Header = ({ children }) => {
   const algolia = services && services.algolia
   console.log('context.pageContext');
   console.log(context.pageContext);
-
-  const isHomePage = window.location.pathname == '/'; // Update this with your home page URL or logic
+  const isHomePage = location.pathname == '/'; // Update this with your home page URL or logic
   console.log('isHomePage');
   console.log(isHomePage);
 
