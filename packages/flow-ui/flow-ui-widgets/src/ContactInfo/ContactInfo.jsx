@@ -11,9 +11,10 @@ const ContactInfo = () => {
     <Section aside title='Advertise With Us'>
       <Card variant='paper'>
         <Text variant='p'>Interested in working together?</Text>
-        <Text variant='p'>
+        {/*<Text variant='p'>
           Suspendisse potenti. Mauris mollis diam tempus ut.
-        </Text>
+  </Text>*/}
+{/*
         {phone && (
           <Text>
             <IconButton variant='simple' role='presentation'>
@@ -21,15 +22,17 @@ const ContactInfo = () => {
             </IconButton>
             {phone}
           </Text>
-        )}
+        )}*/}
         {email && (
           <Text>
             <IconButton variant='simple' role='presentation'>
               <FaEnvelope />
             </IconButton>
-            {email}
+            hello@salesforcestack.com
           </Text>
         )}
+
+        {/*
         {address && (
           <Text>
             <IconButton variant='simple' role='presentation'>
@@ -37,7 +40,7 @@ const ContactInfo = () => {
             </IconButton>
             {address}
           </Text>
-        )}
+        )}*/}
       </Card>
     </Section>
   )

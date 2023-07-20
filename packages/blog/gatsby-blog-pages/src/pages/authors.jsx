@@ -15,8 +15,8 @@ const PageAuthors = props => {
       <Divider />
       <Stack effectProps={{ effect: 'fadeInDown' }}>
         <PageTitle
-          header='Team Members'
-          subheader='FlexiBlog theme comes with a pre-made contact form component. You can integrate this form with serverless services such as Formspree, Getform, FormKeep and others to receive form submissions via email.'
+          header='Writers & Contributors'
+          subheader='Get to know the brilliant minds behind our Salesforce blog. They are here to share their insights, tips, and stories with you!'
         />
       </Stack>
       <Stack>
