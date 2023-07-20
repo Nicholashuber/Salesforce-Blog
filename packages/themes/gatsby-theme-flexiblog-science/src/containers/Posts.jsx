@@ -20,11 +20,27 @@ const Posts = ({
   return (
     <Layout {...props}>
       <Seo title='Home' />
-      <div id="ayo777" style={{
+      <div id="ayo777" className="ayo777-container" style={{
       backgroundImage: `url("https://i.imgur.com/OXzUGFn.png")`,
       backgroundSize: `100% 740px`,
       backgroundRepeat: `no-repeat`,
+      className:`ayo777-container`,
     }}>
+      <style>
+          {`
+          @media (max-width: 767px) {
+            .ayo777-container {
+              background-size: cover !important;
+            }
+          }
+
+          @media (min-width: 768px) {
+            .ayo777-container {
+              background-size: 100% 740px;
+            }
+          }
+          `}
+        </style>
       <Hero sx={{ bg: `` }}>
         <HeroComponent {...props} />
       </Hero>
