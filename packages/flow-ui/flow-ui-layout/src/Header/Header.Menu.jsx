@@ -25,27 +25,30 @@ export const HeaderMenu = ({ mobileMenu = {} }) => {
   const styles = generateStyles(isHomePage);
 
   useEffect(() => {
-    // Check if window object is available (client-side rendering)
-    if (typeof window !== 'undefined') {
-      const currentUrl = window.location.pathname; // Get the current URL
-      const isHome = currentUrl === '/'; // Adjust this condition based on your home page URL
+    const checkIsHomePage = () => {
+      const isHome =
+        typeof window !== 'undefined' && window.location.pathname === '/'; // Check if window object is available and the current URL is the home page
       setIsHomePage(isHome);
+    };
 
-      // Attach an event listener to check the home page on route changes
+    checkIsHomePage(); // Call the function initially
+
+    if (typeof window !== 'undefined') {
       const handleRouteChange = () => {
-        const isHome = window.location.pathname === '/';
-        setIsHomePage(isHome);
+        checkIsHomePage();
       };
 
-      // Add event listener to route changes
       window.addEventListener('popstate', handleRouteChange);
 
       return () => {
-        // Cleanup the event listener on component unmount
         window.removeEventListener('popstate', handleRouteChange);
       };
     }
   }, []);
+
+  if (typeof window === 'undefined') {
+    return null; // Return null during server-side rendering
+  }
 
   const desktopMenuNav = (
     <Navigation
