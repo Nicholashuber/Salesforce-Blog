@@ -54,6 +54,7 @@ export const Header = ({ children }) => {
   const algolia = services && services.algolia
   console.log('context.pageContext');
   console.log(context.pageContext);
+  const location = useLocation(); // Get the location object from @reach/router
   const isHomePage = location.pathname == '/'; // Update this with your home page URL or logic
   console.log('isHomePage');
   console.log(isHomePage);
