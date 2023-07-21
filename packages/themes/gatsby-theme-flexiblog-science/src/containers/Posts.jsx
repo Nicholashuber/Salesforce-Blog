@@ -47,13 +47,13 @@ const Posts = ({
             }
           }
 
-          @media (min-width: 768px) and (max-width: 2560px) {
+          @media (min-width: 768px) and (max-width: 2559px) {
             .ayo777-container {
               background-size: 100% 740px;
             }
           }
 
-          @media (min-width: 2561px) {
+          @media (min-width: 2560px) {
             .ayo777-container {
               background-size: background-size: 100% 1300px;
             }
