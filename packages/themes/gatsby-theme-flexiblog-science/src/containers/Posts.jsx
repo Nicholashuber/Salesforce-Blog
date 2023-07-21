@@ -55,7 +55,7 @@ const Posts = ({
 
           @media (min-width: 2560px) {
             .ayo777-container {
-              background-size: background-size: 100% 1300px;
+              background-size: 100% 1300px !important;
             }
           }
         }
