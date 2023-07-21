@@ -29,16 +29,36 @@ const Posts = ({
       <style>
           {`
           @media (max-width: 767px) {
-            .ayo777-container {
+            .ayo777-container222 {
               background-size: cover !important;
             }
           }
 
           @media (min-width: 768px) {
+            .ayo777-container222 {
+              background-size: 100% 740px;
+            }
+          }
+
+
+          @media (max-width: 767px) {
+            .ayo777-container {
+              background-size: cover !important;
+            }
+          }
+
+          @media (min-width: 768px) and (max-width: 2560px) {
             .ayo777-container {
               background-size: 100% 740px;
             }
           }
+
+          @media (min-width: 2561px) {
+            .ayo777-container {
+              background-size: background-size: 100% 1300px;
+            }
+          }
+        }
           `}
         </style>
       <Hero sx={{ bg: `` }}>
