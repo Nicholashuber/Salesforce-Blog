@@ -16,7 +16,7 @@ Apex offers a set of primitive data types, which are the building blocks for cre
 
 1. Integer: Represents whole numbers, such as 1, -10, or 1000.
 
-```apex
+```java
 Integer num1 = 10;
 Integer num2 = -5;
 Integer result = num1 + num2; // result is 5
@@ -24,7 +24,7 @@ Integer result = num1 + num2; // result is 5
 
 2. Decimal: Stores decimal numbers with high precision, suitable for handling currency or scientific calculations.
 
-```apex
+```java
 Decimal price = 99.99;
 Decimal taxRate = 0.08;
 Decimal totalPrice = price * (1 + taxRate); // totalPrice is 107.99
@@ -32,33 +32,33 @@ Decimal totalPrice = price * (1 + taxRate); // totalPrice is 107.99
 
 3. Boolean: Has only two possible values, `true` or `false`, used for logical operations and decision-making.
 
-```apex
+```java
 Boolean isSalesCompleted = true;
 Boolean isOrderShipped = false;
 ```
 
 4. String: Represents sequences of characters, such as names, addresses, or text values.
 
-```apex
+```java
 String fullName = 'John Doe';
 String address = '123 Main Street';
 ```
 
 5. Date: Stores calendar dates without time components.
 
-```apex
+```java
 Date today = Date.today();
 ```
 
 6. Time: Holds time values without date information.
 
-```apex
+```java
 Time currentTime = Time.now();
 ```
 
 7. Datetime: Combines date and time values to represent specific moments.
 
-```apex
+```java
 Datetime now = Datetime.now();
 ```
 
@@ -68,20 +68,20 @@ In addition to primitive data types, Apex provides collection data types that al
 
 1. List: An ordered collection of elements, allowing duplicates, and accessed by an index.
 
-```apex
+```java
 List<String> fruits = new List<String>{'Apple', 'Banana', 'Orange'};
 String secondFruit = fruits[1]; // secondFruit is 'Banana'
 ```
 
 2. Set: Represents an unordered collection of unique elements, eliminating duplicates.
 
-```apex
+```java
 Set<Integer> numbers = new Set<Integer>{1, 2, 3, 3, 4};
 ```
 
 3. Map: Stores key-value pairs, allowing quick access to values using keys.
 
-```apex
+```java
 Map<String, Integer> studentScores = new Map<String, Integer>{'John': 95, 'Alice': 88, 'Bob': 92};
 Integer aliceScore = studentScores.get('Alice'); // aliceScore is 88
 ```
@@ -90,7 +90,7 @@ Integer aliceScore = studentScores.get('Alice'); // aliceScore is 88
 
 In Apex, you can create custom data types using classes. Custom classes allow you to define your own data structures, combining multiple data types and methods to represent complex objects.
 
-```apex
+```java
 public class ContactInfo {
     public String name;
     public String email;
@@ -107,7 +107,7 @@ contact1.phone = '(555) 123-4567';
 
 Type casting in Apex refers to converting a value from one data type to another. Implicit type casting is done automatically when the compiler can safely convert between compatible data types. However, explicit type casting is required when converting between incompatible data types.
 
-```apex
+```java
 Integer myInteger = 10;
 Decimal myDecimal = 5.5;
 
