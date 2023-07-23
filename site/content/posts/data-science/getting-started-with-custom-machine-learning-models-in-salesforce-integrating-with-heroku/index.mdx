@@ -1,0 +1,116 @@
+---
+title: "Getting Started with Custom Machine Learning Models in Salesforce:
+  Integrating with Heroku"
+date: 2023-07-23T02:00:49.833Z
+author: Nick Huber
+category: Data Science
+---
+In this guide, we will walk you through the steps to develop and integrate a custom machine learning model with Salesforce using the Heroku platform. By following these instructions, you'll be able to leverage the power of custom machine learning in your Salesforce CRM.
+
+## Prerequisites
+
+Before you begin, make sure you have the following prerequisites in place:
+
+1. Salesforce Developer Account: Sign up for a Salesforce developer account if you don't have one already.
+
+2. Heroku Account: Create a Heroku account at https://www.heroku.com/ if you haven't done so.
+
+3. Data Science Framework: Install a data science framework such as scikit-learn, TensorFlow, or PyTorch in your development environment.
+
+4. Salesforce REST API Access: Obtain Salesforce REST API credentials to connect with Salesforce from your custom machine learning model.
+
+## Step 1: Model Development
+
+1. Develop your custom machine learning model using the data science framework of your choice. For example, let's create a simple model using scikit-learn for sentiment analysis:
+
+```python
+# Import the required libraries
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+
+# Sample data for sentiment analysis
+documents = ["I love Salesforce!", "Salesforce is amazing!", "I'm not happy with the service.", "Salesforce needs improvement."]
+labels = ["positive", "positive", "negative", "negative"]
+
+# Create a TF-IDF vectorizer and train the model
+vectorizer = TfidfVectorizer()
+X_train = vectorizer.fit_transform(documents)
+model = MultinomialNB()
+model.fit(X_train, labels)
+```
+
+## Step 2: API Development
+
+1. Develop an API endpoint that will receive input data and return predictions from your custom machine learning model. You can use Flask to create a simple API:
+
+```python
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+# API endpoint to handle predictions
+@app.route('/predict', methods=['POST'])
+def predict_sentiment():
+    data = request.get_json()
+    input_data = data['data']
+    input_vector = vectorizer.transform(input_data)
+    predictions = model.predict(input_vector)
+    return jsonify(predictions.tolist())
+
+if __name__ == '__main__':
+    app.run(debug=True)
+```
+
+## Step 3: Deployment on Heroku
+
+1. Deploy your API to Heroku using Git. Make sure you have the Heroku CLI installed and authenticated.
+
+```bash
+$ heroku login
+$ git init
+$ heroku create your-app-name
+$ git add .
+$ git commit -m "Initial commit"
+$ git push heroku master
+```
+
+## Step 4: Integration with Salesforce
+
+1. Obtain your Heroku API URL and key after deploying the API on Heroku.
+
+2. In your Salesforce developer account, create a custom Apex class to interact with the Heroku API using Salesforce REST API:
+
+```apex
+public class HerokuAPIIntegration {
+    private static String apiUrl = 'https://your-app-name.herokuapp.com/predict'; // Replace with your Heroku API URL
+    private static String apiKey = 'YOUR_API_KEY'; // Replace with your Heroku API key
+
+    public static String getSentimentPrediction(String data) {
+        HttpRequest req = new HttpRequest();
+        req.setEndpoint(apiUrl);
+        req.setMethod('POST');
+        req.setHeader('Content-Type', 'application/json');
+        req.setHeader('Authorization', 'Bearer ' + apiKey);
+        req.setBody('{"data": ["' + data + '"]}');
+        
+        Http http = new Http();
+        HttpResponse res = http.send(req);
+        
+        if (res.getStatusCode() == 200) {
+            return res.getBody();
+        } else {
+            return null;
+        }
+    }
+}
+```
+
+3. Utilize the custom Apex class in your Salesforce workflow or trigger to make predictions using your custom machine learning model:
+
+```apex
+String inputText = 'I am thrilled with the new product!';
+String sentimentPrediction = HerokuAPIIntegration.getSentimentPrediction(inputText);
+System.debug(sentimentPrediction); // Output: ["positive"]
+```
+
+By following these steps, you have successfully developed and integrated a custom machine learning model with Salesforce using the Heroku platform. You can now leverage the power of data science to make advanced predictions and recommendations within your Salesforce CRM.
