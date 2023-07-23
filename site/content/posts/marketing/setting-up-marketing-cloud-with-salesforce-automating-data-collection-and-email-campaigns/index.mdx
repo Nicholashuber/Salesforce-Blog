@@ -1,0 +1,72 @@
+---
+title: "Setting up Marketing Cloud with Salesforce: Automating Data Collection
+  and Email Campaigns"
+date: 2023-07-23T02:24:46.284Z
+author: Nick Huber
+category: Marketing
+---
+Marketing Cloud is a powerful platform that enables businesses to engage with customers through personalized and targeted marketing campaigns. By integrating Marketing Cloud with Salesforce, you can seamlessly synchronize data and create sophisticated automation processes to collect data, segment audiences, and send out relevant emails. In this step-by-step guide, we'll walk you through the process of setting up Marketing Cloud with Salesforce and creating a data automation workflow to collect data weekly and send out an email to a list of records meeting specific criteria.
+
+## Step 1: Setting Up Marketing Cloud Integration with Salesforce
+
+1. Log in to your Marketing Cloud account and navigate to "Setup" in the top-right corner.
+2. Under "Platform Tools," select "Settings" and then click on "Marketing Cloud Connect."
+3. Click on "Configure Marketing Cloud Connector."
+4. Follow the instructions to connect Marketing Cloud with your Salesforce instance. This integration will enable data synchronization between the two platforms.
+
+## Step 2: Creating a Data Extension
+
+1. In Marketing Cloud, go to "Email Studio" and click on "Data Extensions."
+2. Click on "Create" to create a new Data Extension.
+3. Define the fields you want to collect for your data. For example, you might include fields like "Name," "Email," "Company," and "Subscription Preference."
+4. Save the Data Extension, and it will be used to collect the data from Salesforce.
+
+## Step 3: Setting Up Data Automation
+
+1. In Marketing Cloud, go to "Email Studio" and click on "Interactions" > "Automations."
+2. Click on "Create" to create a new Automation.
+3. Choose a name for your Automation and select "Scheduled Automation."
+4. Drag the "Data Extract" activity from the activities pane into the Automation canvas.
+5. Configure the Data Extract activity to extract data from your Salesforce objects and place it in the Data Extension you created in Step 2.
+
+## Step 4: Creating a Filtered Data Extension for Email Audience
+
+1. In Marketing Cloud, go to "Email Studio" and click on "Data Extensions."
+2. Select the Data Extension you created earlier and click on "Create Filter."
+3. Define the criteria for your email audience. For example, you might want to send the email to records where "Subscription Preference" is set to "Subscribed."
+4. Save the Filtered Data Extension, which will be used as the audience for your email.
+
+## Step 5: Creating an Email Template
+
+1. In Marketing Cloud, go to "Email Studio" and click on "Content Builder."
+2. Click on "Create" to create a new Email Template.
+3. Design your email template using the drag-and-drop editor. Personalize the content with dynamic content blocks based on the data fields from your Data Extension.
+4. Save the Email Template.
+
+## Step 6: Creating an Email Send
+
+1. In Marketing Cloud, go to "Email Studio" and click on "Emails."
+2. Click on "Create" to create a new Email Send.
+3. Choose your Email Template, and select the Filtered Data Extension as the audience.
+4. Configure the email settings, such as the sender name, subject line, and preheader.
+5. Schedule the email to be sent weekly or at your desired frequency.
+
+## Step 7: Activating the Automation
+
+1. Go back to the Automation you created in Step 3 and drag the "Send Email" activity from the activities pane into the Automation canvas.
+2. Configure the Send Email activity to use the Email Send you created in Step 6.
+3. Save and activate the Automation.
+
+## Step 8: Monitoring and Analyzing Results
+
+1. Once the Automation is active, it will run on the scheduled frequency, collecting data from Salesforce, filtering the audience, and sending out the email to the targeted records.
+2. Monitor the results of your email campaign, such as open rates, click-through rates, and conversions, in Marketing Cloud's reporting and analytics.
+
+## Real-World Scenario: Weekly Newsletter for Subscribed Contacts
+
+In this real-world scenario, you are a marketing professional aiming to send a weekly newsletter to your subscribed contacts. You collect data from Salesforce, such as the contact's name, email, company, and subscription preference. You use Marketing Cloud's Automation and Data Extension features to automate data collection, segment your audience based on their subscription preference, and send out personalized newsletters to the subscribed contacts every week.
+
+---
+
+By following this step-by-step guide, you can seamlessly integrate Marketing Cloud with Salesforce and set up a data automation workflow to collect data, segment your audience, and send out personalized emails to targeted records. With Marketing Cloud's powerful capabilities, you can create engaging and effective email campaigns, fostering stronger connections with your audience and driving business growth.
+
