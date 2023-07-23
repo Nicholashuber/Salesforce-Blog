@@ -1,0 +1,72 @@
+---
+title: Comparing Old and New Values in an Apex Trigger
+date: 2023-07-23T01:08:54.302Z
+author: Nick Huber
+category: Developer
+---
+# Comparing Old and New Values in an Apex Trigger
+
+When developing Apex triggers in Salesforce, it's crucial to understand how to compare old and new values. This allows you to implement logic based on changes made to records and ensure your triggers execute efficiently. In this blog post, we'll explore techniques to achieve this comparison and improve your trigger implementations.
+
+## What are Old and New Values in Apex Triggers?
+
+In Salesforce, when a trigger is fired, it processes a batch of records. For each record in the batch, the trigger provides two sets of values: old values and new values. 
+
+- **Old Values:** These represent the record's field values before the changes made by the triggering event (e.g., before an update or delete).
+
+- **New Values:** These represent the record's field values after the changes made by the triggering event (e.g., after an update or insert).
+
+## Comparing Old and New Values in an Apex Trigger
+
+Let's consider a scenario where you want to execute specific actions only when a particular field is modified. To achieve this, you can compare the old and new values of the field in your trigger.
+
+```apex
+trigger AccountTrigger on Account (before update) {
+    for (Account acc : Trigger.new) {
+        // Check if the 'Industry' field has changed
+        if (acc.Industry != Trigger.oldMap.get(acc.Id).Industry) {
+            // Perform actions specific to the field change
+            // E.g., Logging, Sending Notifications, etc.
+        }
+    }
+}
+```
+
+In the above example, we use a 'before update' trigger on the Account object. We iterate through the new records (`Trigger.new`) and compare the 'Industry' field with its corresponding old value retrieved from `Trigger.oldMap`.
+
+## Handling Null Values
+
+In some cases, fields might be null, so it's essential to consider null handling during the comparison to avoid potential null pointer exceptions.
+
+```apex
+trigger OpportunityTrigger on Opportunity (before update) {
+    for (Opportunity opp : Trigger.new) {
+        // Check if the 'CloseDate' field has changed and not null
+        if (opp.CloseDate != Trigger.oldMap.get(opp.Id)?.CloseDate) {
+            // Perform actions specific to the non-null field change
+        }
+    }
+}
+```
+
+## Benefits of Comparing Old and New Values
+
+By comparing old and new values, you gain several advantages:
+
+1. **Efficient Triggers:** You can focus trigger actions on relevant field changes, reducing unnecessary processing.
+
+2. **Enhanced Logic:** Tailor trigger logic based on specific field modifications, allowing for more targeted automation.
+
+3. **Consistent Data:** Ensure data integrity by validating changes before they are saved to the database.
+
+## Conclusion
+
+Comparing old and new values in Apex triggers is a fundamental skill that enables you to build efficient and targeted automation. By leveraging the power of old and new value comparisons, you can design triggers that respond intelligently to data changes in your Salesforce org. Improve your trigger implementations and unlock the full potential of Salesforce automation.
+
+Remember to follow best practices for Apex development and thoroughly test your triggers to ensure a seamless user experience and data accuracy. Happy coding on your Salesforce journey!
+
+[Learn more about Apex Triggers](https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_triggers.htm)
+
+---
+
+_By SalesforceStack - Published on July 22, 2023 - [Original Post](https://www.salesforcestack.com/comparing-old-and-new-values-apex-trigger)_
