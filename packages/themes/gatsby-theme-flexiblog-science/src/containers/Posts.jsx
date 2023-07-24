@@ -21,7 +21,7 @@ const Posts = ({
     <Layout {...props}>
       <Seo title='Home' />
       <div id="ayo777" className="ayo777-container" style={{
-      backgroundImage: `url("https://i.imgur.com/bR2Ff82.jpg")`,
+      backgroundImage: `url("https://i.imgur.com/KvfSwbu.png")`,
       backgroundImage2light: `url("https://i.imgur.com/OXzUGFn.png")`,
       backgroundSize: `100% 740px`,
       backgroundRepeat: `no-repeat`,
