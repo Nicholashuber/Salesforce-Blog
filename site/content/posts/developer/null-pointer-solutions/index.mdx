@@ -1,0 +1,39 @@
+title: Null Pointer Exceptions in Apex: Handling and Prevention
+date: 2023-07-22T00:49:27.227Z
+draft: true
+private: false
+author: Nick Huber
+category: Developer
+---
+Null Pointer Exceptions in Apex are a common issue that developers face. This blog post will discuss how to handle and prevent these exceptions in your Apex code.
+
+## Understanding Null Pointer Exceptions in Apex
+
+- - -
+
+A Null Pointer Exception occurs when you try to access a method or property of a null object. This can happen if you have not initialized an object before using it.
+
+## Handling Null Pointer Exceptions in Apex
+
+- - -
+
+To handle Null Pointer Exceptions in Apex, you can use the `try-catch` block. Here is an example:
+
+```apex
+try {
+    // code that may throw a Null Pointer Exception
+} catch (NullPointerException e) {
+    // handle the exception
+}
+```
+
+## Preventing Null Pointer Exceptions in Apex
+
+- - -
+
+To prevent Null Pointer Exceptions in Apex, always check if an object is null before using it. Here is an example:
+
+```apex
+if (myObject != null) {
+    // use myObject
+}
