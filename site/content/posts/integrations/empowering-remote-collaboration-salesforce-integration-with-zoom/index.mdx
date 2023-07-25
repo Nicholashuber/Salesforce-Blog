@@ -1,0 +1,183 @@
+---
+title: "Empowering Remote Collaboration: Salesforce Integration with Zoom"
+date: 2023-07-23T02:47:33.920Z
+featured: true
+author: Nick Huber
+category: Integrations
+thumbnail: salesforce-zoomi-img-1080x628.png
+---
+In today's fast-paced world, remote collaboration is becoming increasingly essential for businesses. Salesforce, being a powerful platform, can be integrated with popular video conferencing tools like Zoom to facilitate seamless remote collaboration. In this blog post, we'll walk through a real-world scenario where a user registers for an appointment, and a unique Zoom URL is automatically created for both the registering user and the user they are scheduling the appointment with, all within Salesforce. We will provide step-by-step instructions and code examples to demonstrate how to achieve this integration.
+## Zoom App for Salesforce
+The Zoom app available on the Salesforce AppExchange provides a comprehensive integration between Salesforce and Zoom, offering features like scheduling Zoom meetings, viewing meeting details, and tracking Zoom engagement data directly from Salesforce. However, for those seeking more control and flexibility over the integration, a custom development approach is an excellent option.
+
+
+## Prerequisites
+
+Before we begin, ensure you have the following prerequisites in place:
+
+1. A Salesforce Developer Account or Sandbox for testing purposes.
+2. A Zoom Developer Account to obtain the necessary API keys.
+3. Basic knowledge of Salesforce development, including Apex and Lightning Web Components (LWC).
+
+## Step 1: Setting Up Zoom Integration
+
+1. Log in to your Zoom Developer Account and navigate to the App Marketplace.
+2. Create a new OAuth App to obtain the necessary API keys (Client ID and Client Secret).
+3. In Salesforce, navigate to "Setup" and search for "Remote Site Settings."
+4. Add the Zoom API URLs (https://api.zoom.us and https://api.zoom.us/oauth) to the Remote Site Settings to enable communication with Zoom's servers.
+
+## Step 2: Creating a Lightning Web Component (LWC) for Appointment Registration
+
+In this scenario, we'll create a Lightning Web Component (LWC) named "AppointmentRegistration" to handle appointment registration and Zoom URL generation.
+
+```html
+<!-- appointmentRegistration.html -->
+<template>
+  <div>
+    <lightning-input type="text" label="Your Name" value={userName} onchange={handleUserNameChange}></lightning-input>
+    <lightning-input type="text" label="Email" value={userEmail} onchange={handleUserEmailChange}></lightning-input>
+    <lightning-input type="text" label="Scheduled User Name" value={scheduledUserName} onchange={handleScheduledUserNameChange}></lightning-input>
+    <lightning-button label="Register Appointment" onclick={registerAppointment}></lightning-button>
+  </div>
+</template>
+```
+
+```js
+// appointmentRegistration.js
+import { LightningElement, track } from 'lwc';
+import createZoomMeeting from '@salesforce/apex/ZoomController.createZoomMeeting';
+
+export default class AppointmentRegistration extends LightningElement {
+  @track userName;
+  @track userEmail;
+  @track scheduledUserName;
+
+  handleUserNameChange(event) {
+    this.userName = event.target.value;
+  }
+
+  handleUserEmailChange(event) {
+    this.userEmail = event.target.value;
+  }
+
+  handleScheduledUserNameChange(event) {
+    this.scheduledUserName = event.target.value;
+  }
+
+  registerAppointment() {
+    // Call Apex method to create Zoom meeting and generate Zoom URL
+    createZoomMeeting({ 
+      userName: this.userName, 
+      userEmail: this.userEmail, 
+      scheduledUserName: this.scheduledUserName 
+    })
+      .then((zoomUrl) => {
+        // Display the generated Zoom URL to the user
+        this.showToast('Success', `Your Zoom URL: ${zoomUrl}`, 'success');
+      })
+      .catch((error) => {
+        // Handle error
+        this.showToast('Error', 'An error occurred', 'error');
+      });
+  }
+
+  showToast(title, message, variant) {
+    const event = new ShowToastEvent({
+      title: title,
+      message: message,
+      variant: variant
+    });
+    this.dispatchEvent(event);
+  }
+}
+```
+
+## Step 3: Creating an Apex Controller for Zoom Integration
+
+1. Create an Apex class named "ZoomController" to handle Zoom integration.
+
+```java
+public with sharing class ZoomController {
+  @AuraEnabled
+  public static String createZoomMeeting(String userName, String userEmail, String scheduledUserName) {
+    try {
+      // Authenticate with Zoom using OAuth 2.0
+      String zoomClientId = 'your_zoom_client_id'; // Replace with your Zoom Client ID
+      String zoomClientSecret = 'your_zoom_client_secret'; // Replace with your Zoom Client Secret
+      String zoomRedirectUri = 'https://your_salesforce_instance_url/apex/ZoomOAuthCallback'; // Replace with your Salesforce instance URL
+      
+      String authUrl = 'https://zoom.us/oauth/authorize?response_type=code&client_id=' + zoomClientId + '&redirect_uri=' + EncodingUtil.urlEncode(zoomRedirectUri, 'UTF-8');
+      PageReference authPage = new PageReference(authUrl);
+      authPage.setRedirect(true);
+
+      return authPage.getUrl();
+    } catch (Exception e) {
+      // Handle any errors and return null on failure
+      return null;
+    }
+  }
+}
+```
+
+## Step 4: Handling Zoom OAuth Callback
+
+1. Create an Apex class named "ZoomOAuthCallback" to handle the Zoom OAuth callback.
+
+```java
+public without sharing class ZoomOAuthCallback {
+  public void handleCallback() {
+    String zoomClientId = 'your_zoom_client_id'; // Replace with your Zoom Client ID
+    String zoomClientSecret = 'your_zoom_client_secret'; // Replace with your Zoom Client Secret
+    String zoomRedirectUri = 'https://your_salesforce_instance_url/apex/ZoomOAuthCallback'; // Replace with your Salesforce instance URL
+
+    String code = ApexPages.currentPage().getParameters().get('code');
+    String tokenUrl = 'https://zoom.us/oauth/token?grant_type=authorization_code&code=' + code + '&redirect_uri=' + EncodingUtil.urlEncode(zoomRedirectUri, 'UTF-8');
+    
+    HttpRequest req = new HttpRequest();
+    req.setEndpoint(tokenUrl);
+    req.setMethod('POST');
+    String authHeader = EncodingUtil.base64Encode(Blob.valueOf(zoomClientId + ':' + zoomClientSecret));
+    req.setHeader('Authorization', 'Basic ' + authHeader);
+
+    Http http = new Http();
+    HttpResponse res = http.send(req);
+
+    if (res.getStatusCode() == 200) {
+      // Parse the access token from the response
+      Map<String, Object> tokenData = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+      String accessToken = (String) tokenData.get('access_token');
+      
+      // Use the access token to create a Zoom meeting and obtain the meeting URL
+      String zoomMeetingUrl = 'https://api.zoom.us/v2/users/me/meetings';
+      String requestBody = '{ "topic": "Appointment with ' + scheduledUserName + '", "type": 2, "start_time": "2023-12-31T23:59:59Z", "timezone": "America/New_York" }';
+
+      HttpRequest meetingReq = new HttpRequest();
+      meetingReq.setEndpoint(zoomMeetingUrl);
+      meetingReq.setMethod('POST');
+      meetingReq.setHeader('Content-Type', 'application/json');
+      meetingReq.setHeader('Authorization', 'Bearer ' + accessToken);
+      meetingReq.setBody(requestBody);
+
+      HttpResponse meetingRes = http.send(meetingReq);
+      if (meetingRes.getStatusCode() == 201) {
+        // Meeting created successfully, parse the meeting URL from the response
+        Map<String, Object> meetingData = (Map<String, Object>) JSON.deserializeUntyped(meetingRes.getBody());
+        String zoomUrl = (String) meetingData.get('join_url');
+        return zoomUrl;
+      } else {
+        // Error creating the meeting
+        return null;
+      }
+    }
+
+ else {
+      // Error obtaining the access token
+      return null;
+    }
+  }
+}
+```
+
+## Conclusion
+
+In this blog post, we have successfully demonstrated how to empower remote collaboration by integrating Salesforce with Zoom. Users can now register for appointments, and a unique Zoom URL is automatically generated for both the registering user and the user they are scheduling the appointment with. By following the step-by-step instructions and using the provided code examples, you can easily set up this powerful integration and streamline your remote collaboration processes.
