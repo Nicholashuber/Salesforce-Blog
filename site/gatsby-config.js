@@ -5,6 +5,13 @@ module.exports = {
       options: {}
     },
     {
+      resolve: 'gatsby-plugin-google-analytics',
+      options: {
+        // The property ID; the tracking code won't be generated without it
+        trackingId: 'G-KHKWH0EPB2'
+      }
+    },
+    {
       resolve: '@elegantstack/gatsby-theme-flexiblog-science',
       options: {
         // Add theme options here. Check documentation for available options.
