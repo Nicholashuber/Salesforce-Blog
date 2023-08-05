@@ -2,7 +2,10 @@
   "name": "elegantstack",
   "private": true,
   "license": "",
-  "workspaces": ["packages/**", "site"],
+  "workspaces": [
+    "packages/**",
+    "site"
+  ],
   "scripts": {
     "clean": "lerna clean",
     "release": "lerna version"
@@ -12,5 +15,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "gatsby-plugin-google-gtag": "^5.11.0"
   }
 }
