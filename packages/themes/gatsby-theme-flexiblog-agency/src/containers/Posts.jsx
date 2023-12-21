@@ -39,8 +39,8 @@ const Posts = ({
 
 
 
-      
-      
+
+
       <div id="ayo777" className="ayo777-container" style={{
       backgroundImage: `url("https://i.imgur.com/KvfSwbu.png")`,
       backgroundImage2light: `url("https://i.imgur.com/OXzUGFn.png")`,
@@ -99,6 +99,7 @@ const Posts = ({
         <img src="https://i.imgur.com/KloMjnY.png" alt="image"/>
         </div>
       </div>
+      <Divider/>
 
 
 
@@ -112,15 +113,14 @@ const Posts = ({
 
 
 
-      
-
-
-      
 
 
 
 
-      
+
+
+
+
       <Stack effectProps={{ effect: false }}>
         <Categories categories={categories} variant='horizontal' omitTitle />
       </Stack>
