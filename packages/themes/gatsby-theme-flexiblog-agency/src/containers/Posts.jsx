@@ -1,5 +1,6 @@
 import React from 'react'
-import { Layout, Stack, Main, Sidebar } from '@layout'
+import { Box } from 'theme-ui'//new
+import { Layout, Stack, Main, Sidebar, Hero } from '@layout'
 import CardList from '@components/CardList'
 import Divider from '@components/Divider'
 import Seo from '@widgets/Seo'
@@ -7,6 +8,9 @@ import Categories from '@widgets/Categories'
 import NewsletterExpanded from '@widgets/NewsletterExpanded'
 import BannerHorizontal from '@widgets/BannerHorizontal'
 import BannerVertical from '@widgets/BannerVertical'
+
+import HeroComponent from '../components/Hero/Hero'//new
+
 import { useBlogCategories } from '@helpers-blog'
 
 const Posts = ({
@@ -19,7 +23,104 @@ const Posts = ({
   return (
     <Layout {...props}>
       <Seo title='Home' />
-      <Divider />
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+      
+      
+      <div id="ayo777" className="ayo777-container" style={{
+      backgroundImage: `url("https://i.imgur.com/KvfSwbu.png")`,
+      backgroundImage2light: `url("https://i.imgur.com/OXzUGFn.png")`,
+      backgroundSize: `100% 740px`,
+      backgroundRepeat: `no-repeat`,
+      className:`ayo777-container`,
+    }}>
+      <style>
+          {`
+          @media (max-width: 767px) {
+            .ayo777-container222 {
+              background-size: cover !important;
+            }
+          }
+
+          @media (min-width: 768px) {
+            .ayo777-container222 {
+              background-size: 100% 740px;
+            }
+          }
+
+
+          @media (max-width: 767px) {
+            .ayo777-container {
+              background-size: cover !important;
+            }
+          }
+
+          @media (min-width: 768px) and (max-width: 2559px) {
+            .ayo777-container {
+              background-size: 100% 740px;
+            }
+          }
+
+          @media (min-width: 2560px) {
+            .ayo777-container {
+              background-size: 100% 1300px !important;
+            }
+          }
+        }
+          `}
+        </style>
+      <Hero sx={{ bg: `` }}>
+        <HeroComponent {...props} />
+      </Hero>
+      <div class="banner-white-shape"
+      style={{
+        display: `none`,
+        position: `absolute`,
+        left: `0`,
+        bottom: `66px`,
+        width: `100%`,
+        zindex: `1`,
+        height: `112.7%`,
+      }}>
+        <img src="https://i.imgur.com/KloMjnY.png" alt="image"/>
+        </div>
+      </div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+      
+
+
+      
+
+
+
+
+      
       <Stack effectProps={{ effect: false }}>
         <Categories categories={categories} variant='horizontal' omitTitle />
       </Stack>
