@@ -33,7 +33,8 @@ module.exports = {
       },
     },
     {
-      resolve: '@elegantstack/gatsby-theme-flexiblog-science',
+      /////resolve: '@elegantstack/gatsby-theme-flexiblog-science',
+      resolve: '@elegantstack/gatsby-theme-flexiblog-agency',
       options: {
         // Add theme options here. Check documentation for available options.
         siteUrl: process.env.URL || process.env.VERCEL_URL,
