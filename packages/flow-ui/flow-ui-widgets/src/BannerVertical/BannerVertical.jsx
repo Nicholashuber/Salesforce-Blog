@@ -70,9 +70,9 @@ const BannerVertical = () => (
       as={Link}
       to='/'
       sx={styles.button}
-      aria-label='Submit Your Article'
+      aria-label='Get Started'
     >
-      Submit Your Article
+      Get Started
     </Button>
   </Flex>
 )
