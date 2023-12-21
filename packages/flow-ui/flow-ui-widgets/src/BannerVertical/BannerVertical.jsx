@@ -55,25 +55,24 @@ const BannerVertical = () => (
   <Flex sx={styles.wrapper}>
     <Heading variant='h2' sx={styles.heading}>
       <FaRegHandshake />
-      Best Networking Workshops
+      Write For Us
     </Heading>
     <Heading variant='h4' sx={styles.subheading}>
-      In this workshop, learn when and how to network with modern best
-      practices.
+      SalesforceStack is looking for authors to share their Salesforce experiences and knowledge.
     </Heading>
     <Text as='ul' variant='small' sx={styles.list}>
-      <li>Explain the importance of networking for career-building</li>
-      <li>Practice modern tips for effective networking</li>
-      <li>Understand the steps towards building your own network</li>
+    <li>Share your unique Salesforce experiences and knowledge</li>
+    <li>Connect with a diverse audience eager to learn</li>
+    <li>Adhere to our guidelines to maintain quality and relevance</li>
     </Text>
     <Button
       variant='primary'
       as={Link}
       to='/'
       sx={styles.button}
-      aria-label='Learn More'
+      aria-label='Submit Your Article'
     >
-      Learn More
+      Submit Your Article
     </Button>
   </Flex>
 )
