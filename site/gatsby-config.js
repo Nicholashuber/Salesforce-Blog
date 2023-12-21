@@ -48,7 +48,7 @@ module.exports = {
     //General Site Metadata
     title: 'SalesforceStack Blog',
     name: 'SalesforceStack',
-    description: 'My site description...',
+    description: 'Explore the world of Salesforce with expert insights, news, and community contributions. Your one-stop hub for everything Salesforce.',
     address: 'New York, NY',
     email: 'email@example.com',
     phone: '+1 (888) 888-8888',
