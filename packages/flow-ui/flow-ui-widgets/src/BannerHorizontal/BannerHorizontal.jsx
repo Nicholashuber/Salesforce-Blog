@@ -41,13 +41,13 @@ const BannerHorizontal = () => {
     <Flex sx={styles.wrapper(banner && banner.src)}>
       <Box sx={styles.left}>
         <Heading variant='h3' sx={styles.heading}>
-          The latest IT market analysis report - May 2020
+          Join Our Newsletter for the Latest Salesforce Insights
         </Heading>
-        <Text sx={styles.subheading}>This month's analysis is a must see.</Text>
+        <Text sx={styles.subheading}>Stay ahead in the Salesforce ecosystem with our curated content.</Text>
       </Box>
       <Box sx={styles.right}>
-        <Button as={Link} to='/' variant='primary' aria-label='Download Report'>
-          Download Report
+        <Button as={Link} to='/' variant='primary' aria-label='Subscribe Now'>
+          Subscribe Now
         </Button>
       </Box>
     </Flex>
