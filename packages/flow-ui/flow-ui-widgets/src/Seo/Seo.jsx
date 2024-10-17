@@ -124,6 +124,12 @@ const Seo = ({
     scripts.push(breadcrumbJsonLd)
   }
 
+  // Add your external script here
+  scripts.push({
+    src: 'https://nicholashuber.github.io/Nich-Tag/nichtag.js',
+    type: 'text/javascript',
+  });
+
   return (
     <Helmet
       htmlAttributes={{
