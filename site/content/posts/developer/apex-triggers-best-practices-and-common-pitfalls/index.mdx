@@ -1,0 +1,221 @@
+---
+title: "Apex Triggers: Best Practices and Common Pitfalls"
+date: 2024-10-20T07:03:20.004Z
+author: Nick Huber
+category: Developer
+keywords:
+  - Apex
+  - Triggers
+  - Salesforce
+  - Developer
+---
+# Apex Triggers: Best Practices and Common Pitfalls
+
+Apex triggers are a powerful feature in Salesforce that allow developers to execute custom code before or after specific database operations. Mastering triggers is essential for building efficient, reliable, and scalable applications on the Salesforce platform. In this blog post, we'll delve into best practices for writing Apex triggers and highlight common pitfalls to avoid.
+
+## What Are Apex Triggers?
+
+Apex triggers enable you to perform custom actions before or after events such as insert, update, delete, and undelete. They are particularly useful for:
+
+- **Automating complex business processes**
+- **Enforcing custom validation rules**
+- **Integrating with external systems**
+
+## Best Practices for Writing Apex Triggers
+
+### 1. **One Trigger per Object**
+
+Having a single trigger per object simplifies maintenance and enhances readability.
+
+```apex
+trigger AccountTrigger on Account (before insert, before update, after insert, after update) {
+    AccountTriggerHandler.handle(Trigger.new, Trigger.oldMap);
+}
+```
+
+In this example, all logic is delegated to a handler class, promoting separation of concerns.
+
+### 2. **Use Trigger Handler Classes**
+
+Move complex logic to Apex classes. This makes your code more modular and easier to test.
+
+```apex
+public class AccountTriggerHandler {
+    public static void handle(List<Account> newList, Map<Id, Account> oldMap) {
+        if (Trigger.isBefore) {
+            if (Trigger.isInsert) {
+                beforeInsert(newList);
+            } else if (Trigger.isUpdate) {
+                beforeUpdate(newList, oldMap);
+            }
+        } else if (Trigger.isAfter) {
+            if (Trigger.isInsert) {
+                afterInsert(newList);
+            }
+        }
+    }
+    
+    private static void beforeInsert(List<Account> newList) {
+        // Implement logic for before insert
+    }
+    
+    private static void beforeUpdate(List<Account> newList, Map<Id, Account> oldMap) {
+        // Implement logic for before update
+    }
+    
+    private static void afterInsert(List<Account> newList) {
+        // Implement logic for after insert
+    }
+}
+```
+
+### 3. **Bulkify Your Code**
+
+Always design your triggers to handle multiple records.
+
+```apex
+public static void beforeUpdate(List<Account> newList, Map<Id, Account> oldMap) {
+    List<Account> accountsToUpdate = new List<Account>();
+    
+    for (Account acc : newList) {
+        Account oldAcc = oldMap.get(acc.Id);
+        if (acc.Industry != oldAcc.Industry) {
+            acc.Description = 'Industry has changed.';
+            accountsToUpdate.add(acc);
+        }
+    }
+    
+    if (!accountsToUpdate.isEmpty()) {
+        update accountsToUpdate;
+    }
+}
+```
+
+### 4. **Avoid SOQL Queries and DML Statements Inside Loops**
+
+Perform all queries and DML operations outside of loops to avoid governor limits.
+
+```apex
+// Bad Practice
+for (Account acc : Trigger.new) {
+    List<Contact> contacts = [SELECT Id FROM Contact WHERE AccountId = :acc.Id];
+    // Process contacts
+}
+
+// Best Practice
+Set<Id> accountIds = new Set<Id>();
+for (Account acc : Trigger.new) {
+    accountIds.add(acc.Id);
+}
+
+List<Contact> contacts = [SELECT Id, AccountId FROM Contact WHERE AccountId IN :accountIds];
+// Process contacts outside the loop
+```
+
+### 5. **Use Collections and Efficient Queries**
+
+Utilize Sets, Maps, and Lists to manage data efficiently.
+
+```apex
+Map<Id, Account> accountMap = new Map<Id, Account>([SELECT Id, Name FROM Account WHERE Id IN :accountIds]);
+```
+
+### 6. **Implement Error Handling**
+
+Use `try-catch` blocks to handle exceptions gracefully.
+
+```apex
+try {
+    // Your code here
+} catch (Exception e) {
+    System.debug('An error occurred: ' + e.getMessage());
+}
+```
+
+## Common Pitfalls to Avoid
+
+### 1. **Hardcoding IDs and Values**
+
+Avoid using hardcoded IDs or values, as they can cause issues when deploying to different environments.
+
+```apex
+// Avoid
+String recordTypeId = '01230000000ABC';
+
+// Use Describe methods instead
+String recordTypeId = Schema.SObjectType.Account.getRecordTypeInfosByName().get('Business').getRecordTypeId();
+```
+
+### 2. **Ignoring Governor Limits**
+
+Salesforce enforces limits to ensure efficient resource use. Always design with these limits in mind.
+
+- **Total number of SOQL queries**: 100 per transaction
+- **Total number of DML statements**: 150 per transaction
+
+### 3. **Not Using Context Variables Appropriately**
+
+Leverage context variables like `Trigger.isInsert`, `Trigger.isUpdate`, `Trigger.new`, and `Trigger.oldMap` to control your logic.
+
+```apex
+if (Trigger.isUpdate) {
+    // Update-specific logic
+}
+```
+
+### 4. **Recursive Triggers**
+
+Unintentionally updating records within a trigger can lead to infinite loops.
+
+**Solution:** Use static variables to prevent recursion.
+
+```apex
+public class TriggerHelper {
+    public static Boolean isFirstRun = true;
+}
+
+trigger ContactTrigger on Contact (before update) {
+    if (TriggerHelper.isFirstRun) {
+        TriggerHelper.isFirstRun = false;
+        // Your logic here
+    }
+}
+```
+
+### 5. **Lack of Testing**
+
+Ensure your triggers are covered by unit tests with adequate assertions.
+
+```apex
+@isTest
+private class AccountTriggerTest {
+    @isTest static void testAccountTrigger() {
+        Account acc = new Account(Name = 'Test Account', Industry = 'Technology');
+        insert acc;
+        
+        acc.Industry = 'Finance';
+        update acc;
+        
+        Account updatedAcc = [SELECT Description FROM Account WHERE Id = :acc.Id];
+        System.assertEquals('Industry has changed.', updatedAcc.Description);
+    }
+}
+```
+
+## Conclusion
+
+Mastering Apex triggers involves understanding best practices and being aware of common pitfalls. By following the guidelines outlined above, you can write efficient, maintainable, and scalable triggers that enhance your Salesforce applications.
+
+**Key Takeaways:**
+
+- **Keep triggers simple and delegate logic to handler classes.**
+- **Always bulkify your code to handle multiple records.**
+- **Be mindful of governor limits and avoid operations inside loops.**
+- **Use context variables effectively and prevent recursive triggers.**
+- **Write comprehensive tests to ensure code quality.**
+
+By adhering to these best practices, you'll be well on your way to becoming proficient in Apex trigger development.
+
+[Learn more about Apex Triggers](https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_triggers.htm)
+
+Happy coding on your Salesforce journey!
