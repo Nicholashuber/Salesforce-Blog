@@ -1,0 +1,95 @@
+---
+title: "Advanced Salesforce Trigger Design Patterns: Ensuring Efficiency and
+  Scalability"
+date: 2025-03-17T03:35:02.462Z
+author: Nick Huber
+category: Developer
+---
+# Advanced Salesforce Trigger Design Patterns: Ensuring Efficiency and Scalability
+
+Salesforce triggers are a powerful tool for automating business logic, but poor implementation can lead to inefficiencies, recursion issues, and governor limits. In this blog post, we’ll explore **advanced trigger design patterns** to ensure your triggers are **scalable, efficient, and easy to maintain**.
+
+## Why Use Trigger Design Patterns?
+
+A well-structured trigger follows best practices to prevent issues like:
+
+- Recursive loops
+- Unnecessary SOQL queries (leading to governor limits)
+- Poor maintainability due to excessive logic in a single trigger
+
+Implementing **Trigger Handler Patterns** can help maintain **a clean and optimized approach to Salesforce automation**.
+
+## Best Practices for Advanced Trigger Design
+
+### 1. The One-Trigger-Per-Object Rule
+
+Having multiple triggers on the same object can lead to execution order unpredictability. Instead, use **a single trigger per object** and delegate logic to a handler class.
+
+#### Example: Using a Trigger Handler
+
+```apex
+trigger AccountTrigger on Account (before insert, before update, after insert, after update) {
+    AccountTriggerHandler.handleTrigger(Trigger.new, Trigger.oldMap, Trigger.operationType);
+}
+```
+
+By calling a **separate handler class**, we maintain cleaner, more structured code.
+
+### 2. Using Trigger Frameworks for Scalability
+
+Apex Trigger Frameworks like **TriggerHandler** help you scale automation by centralizing logic.
+
+#### Example: Base Trigger Framework
+
+```apex
+public abstract class BaseTriggerHandler {
+    public virtual void beforeInsert(List<SObject> newRecords) {}
+    public virtual void beforeUpdate(List<SObject> newRecords, Map<Id, SObject> oldRecords) {}
+}
+```
+
+### 3. Prevent Recursive Trigger Execution
+
+If a trigger modifies records that cause another trigger to fire, an **infinite loop** may occur.
+
+#### Solution: Use Static Variables
+
+```apex
+public class TriggerHelper {
+    private static Boolean isTriggerRunning = false;
+    
+    public static Boolean shouldRun() {
+        if (isTriggerRunning) return false;
+        isTriggerRunning = true;
+        return true;
+    }
+}
+```
+
+This ensures your trigger **only runs once per transaction**, preventing unintended recursion.
+
+### 4. Bulkifying Apex Triggers
+
+Hardcoded SOQL queries inside loops are a common mistake in trigger development.
+
+#### Bad Example (Governor Limits Risk)
+
+```apex
+for (Account acc : Trigger.new) {
+    Contact c = [SELECT Id FROM Contact WHERE AccountId = :acc.Id LIMIT 1]; 
+}
+```
+
+#### Optimized Example
+
+```apex
+Map<Id, Account> accounts = new Map<Id, Account>([SELECT Id, Name FROM Account WHERE Id IN :Trigger.newMap.keySet()]);
+```
+
+This approach **retrieves all necessary records in a single SOQL query**, preventing **governor limit exceptions**.
+
+## Conclusion
+
+By implementing these **advanced Apex trigger design patterns**, you can ensure your Salesforce triggers remain **efficient, scalable, and maintainable**. Whether you're handling complex business logic or automating workflows, following these best practices will **future-proof your org’s automation**.
+
+**Would you like to learn more about a specific trigger framework? Let us know in the comments!**
