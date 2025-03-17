@@ -1,0 +1,173 @@
+---
+title: "Mastering SOQL in Salesforce: Best Practices and Advanced Query Techniques"
+date: 2025-03-17T04:37:09.101Z
+author: Nick Huber
+category: Developer
+thumbnail: salesforce-jitterbit-integration-blog-img-1080x6282-2-.webp
+---
+
+
+# Mastering SOQL in Salesforce: Best Practices and Advanced Query Techniques
+
+**Salesforce Object Query Language (SOQL)** is an essential tool for developers who work with Salesforce data. Whether you're retrieving records, optimizing queries, or avoiding governor limits, **understanding SOQL best practices** is crucial for **performance and scalability**.
+
+In this guide, we’ll cover **best practices, advanced techniques, and real-world scenarios** to help you write optimized SOQL queries.
+
+---
+
+## 📌 What is SOQL?
+
+SOQL (Salesforce Object Query Language) is a query language similar to SQL but tailored for Salesforce. It allows developers to retrieve data from Salesforce objects in an efficient and structured way.
+
+### 🔹 Example SOQL Query
+
+```apex
+SELECT Id, Name, Industry FROM Account WHERE Industry = 'Technology'
+```
+
+---
+
+## 🚀 Best Practices for Writing SOQL Queries
+
+### 1️⃣ Use Selective Filters for Performance
+
+Using indexed fields as filters improves query speed and prevents **Full Table Scans**, which can lead to performance issues.
+
+✅ **Good Example (Using an Indexed Field)**
+
+```apex
+SELECT Id, Name FROM Account WHERE CreatedDate = LAST_N_DAYS:30
+```
+
+❌ **Bad Example (Non-Selective Filter on a Large Object)**
+
+```apex
+SELECT Id, Name FROM Account WHERE Name LIKE '%Tech%'
+```
+
+**Tip:** Use the [Query Plan Tool](https://developer.salesforce.com/docs/atlas.en-us.soql_sosl.meta/soql_sosl/sforce_api_calls_soql_query_plan.htm) in Developer Console to analyze query efficiency.
+
+---
+
+### 2️⃣ Avoid SELECT * (Retrieve Only Required Fields)
+
+Retrieving unnecessary fields **increases data processing time** and can **hit governor limits**.
+
+✅ **Good Example (Fetching Only Required Fields)**
+
+```apex
+SELECT Id, Name FROM Contact WHERE AccountId = :someAccountId
+```
+
+❌ **Bad Example (Fetching Unnecessary Fields)**
+
+```apex
+SELECT Id, Name, Phone, Email, MailingAddress, Description FROM Contact WHERE AccountId = :someAccountId
+```
+
+---
+
+### 3️⃣ Use Relationships for Efficient Data Retrieval
+
+Instead of making multiple queries, use **relationship queries** to fetch data in a single call.
+
+✅ **Parent-to-Child Query (Subquery Example)**
+
+```apex
+SELECT Id, Name, (SELECT Id, LastName FROM Contacts) FROM Account WHERE Industry = 'Technology'
+```
+
+✅ **Child-to-Parent Query (Using Relationship Fields)**
+
+```apex
+SELECT Id, Name, Account.Name FROM Contact WHERE Email LIKE '%@example.com'
+```
+
+---
+
+### 4️⃣ Bulkify Queries to Handle Large Data Volumes
+
+Always use **collections** (lists, sets, and maps) to process bulk records in SOQL queries.
+
+✅ **Good Example (Bulkified Query)**
+
+```apex
+Map<Id, Account> accountsMap = new Map<Id, Account>(
+    [SELECT Id, Name FROM Account WHERE Id IN :accountIds]
+);
+```
+
+❌ **Bad Example (Query Inside a Loop - Hits Governor Limits)**
+
+```apex
+for (Account acc : someAccountList) {
+    Account accData = [SELECT Id, Name FROM Account WHERE Id = :acc.Id];
+}
+```
+
+---
+
+### 5️⃣ Use Aggregate Functions for Reporting
+
+Instead of retrieving all records and processing them in Apex, use **SOQL aggregate functions** for performance optimization.
+
+✅ **Good Example (Using COUNT)**
+
+```apex
+SELECT COUNT(Id) FROM Contact WHERE AccountId = :someAccountId
+```
+
+✅ **Good Example (Using SUM & GROUP BY)**
+
+```apex
+SELECT Industry, COUNT(Id) FROM Account GROUP BY Industry
+```
+
+---
+
+## 🔥 Advanced SOQL Techniques
+
+### 6️⃣ Optimize Queries with LIMIT & ORDER BY
+
+Using `LIMIT` and `ORDER BY` **improves performance** by restricting data retrieval.
+
+```apex
+SELECT Id, Name FROM Opportunity ORDER BY CreatedDate DESC LIMIT 10
+```
+
+---
+
+### 7️⃣ Use OFFSET for Pagination
+
+When dealing with large datasets, use `OFFSET` to implement **pagination** in SOQL queries.
+
+```apex
+SELECT Id, Name FROM Account ORDER BY CreatedDate DESC LIMIT 50 OFFSET 50
+```
+
+---
+
+### 8️⃣ Asynchronous SOQL Queries for Large Data Sets
+
+For handling **millions of records**, use **Asynchronous SOQL** via **Batch Apex** or **Big Object Queries**.
+
+```apex
+Database.QueryLocator ql = Database.getQueryLocator([SELECT Id, Name FROM BigObject]);
+```
+
+---
+
+## 🔍 Common SOQL Errors & How to Fix Them
+
+🔴 **"Too many SOQL queries: 101"** – This occurs when queries are run inside loops. **Solution:** Bulkify your SOQL queries.
+
+🔴 **"System.LimitException: Too many query rows: 50001"** – This means you have exceeded the **query row limit**. **Solution:** Use **LIMIT**, **Filters**, and **Batch Apex**.
+
+---
+
+## 📌 Final Thoughts
+
+Mastering **SOQL best practices** will **boost Salesforce performance** and prevent governor limit issues. Always **optimize your queries** by using selective filters, relationship queries, and bulkifying SOQL calls.
+
+💡 **Want to explore more about SOQL?** Drop a comment below with your questions! 🚀
+
