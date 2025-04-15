@@ -11,12 +11,14 @@ export const pageQuery = graphql`
     $includeExcerpt: Boolean!
     $includeTimeToRead: Boolean!
     $imageQuality: Int!
+    $currentDate: Date!
   ) {
     featuredPosts: allArticle(
       filter: {
         private: { ne: true }
         draft: { ne: true }
         featured: { eq: true }
+        date: { lte: $currentDate }
       }
       sort: { date: DESC }
       limit: 10
@@ -27,7 +29,11 @@ export const pageQuery = graphql`
       }
     }
     recentPosts: allArticle(
-      filter: { private: { ne: true }, draft: { ne: true } }
+      filter: {
+        private: { ne: true },
+        draft: { ne: true },
+        date: { lte: $currentDate }
+      }
       sort: { date: DESC }
       limit: 6
     ) {
@@ -37,7 +43,11 @@ export const pageQuery = graphql`
       }
     }
     posts: allArticle(
-      filter: { private: { ne: true }, draft: { ne: true } }
+      filter: {
+        private: { ne: true },
+        draft: { ne: true },
+        date: { lte: $currentDate }
+      }
       sort: { date: DESC }
       limit: 1000
     ) @skip(if: $paginatePostsPage) {
@@ -50,7 +60,11 @@ export const pageQuery = graphql`
       }
     }
     paginatedPosts: allArticle(
-      filter: { private: { ne: true }, draft: { ne: true } }
+      filter: {
+        private: { ne: true },
+        draft: { ne: true },
+        date: { lte: $currentDate }
+      }
       sort: { date: DESC }
       limit: $limit
       skip: $skip

@@ -3,6 +3,7 @@ const postQuery = `{
     filter: {
       private: {ne: true}
       draft: {ne: true}
+      date: {lte: "${new Date().toISOString()}"}
     }
   ) {
     edges {

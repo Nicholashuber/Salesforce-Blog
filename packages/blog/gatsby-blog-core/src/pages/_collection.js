@@ -15,6 +15,7 @@ module.exports = async (
   } = pluginOptions
 
   pageContextOptions.mobileMenu = await queryMobileMenu({ graphql })
+  pageContextOptions.currentDate = new Date().toISOString()
 
   const result = await graphql(`
 		{

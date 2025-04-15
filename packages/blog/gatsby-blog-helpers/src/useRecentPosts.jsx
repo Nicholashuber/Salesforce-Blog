@@ -10,9 +10,14 @@ const recentPostsQuery = graphql`
     $includeExcerpt: Boolean! = true
     $includeTimeToRead: Boolean! = true
     $imageQuality: Int! = 75
+    $currentDate: Date! = "${new Date().toISOString()}"
   ) {
     recentPosts: allArticle(
-      filter: { private: { ne: true }, draft: { ne: true } }
+      filter: {
+        private: { ne: true },
+        draft: { ne: true },
+        date: { lte: $currentDate }
+      }
       sort: { date: DESC }
       limit: 6
     ) {

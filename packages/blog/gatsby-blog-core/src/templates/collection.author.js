@@ -11,6 +11,7 @@ export const pageQuery = graphql`
     $includeExcerpt: Boolean!
     $includeTimeToRead: Boolean!
     $imageQuality: Int!
+    $currentDate: Date!
   ) {
     collectionInfo: articleAuthor(slug: { eq: $slug }) {
       ...ArticleAuthor
@@ -20,6 +21,7 @@ export const pageQuery = graphql`
         private: { ne: true }
         draft: { ne: true }
         author: { slug: { eq: $slug } }
+        date: { lte: $currentDate }
       }
       sort: { date: DESC }
       limit: $limit

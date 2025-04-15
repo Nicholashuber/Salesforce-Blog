@@ -15,6 +15,7 @@ export const pageQuery = graphql`
     $includeTimeToRead: Boolean!
     $includeTableOfContents: Boolean!
     $imageQuality: Int!
+    $currentDate: Date!
   ) {
     post: article(id: { eq: $id }) {
       ...ArticleInformation
@@ -27,6 +28,7 @@ export const pageQuery = graphql`
         tags: { elemMatch: { id: { in: $tagsIds } } }
         category: { id: { eq: $categoryId } }
         id: { ne: $id }
+        date: { lte: $currentDate }
       }
       sort: { date: DESC }
       limit: 6
@@ -42,6 +44,7 @@ export const pageQuery = graphql`
         draft: { ne: true }
         tags: { elemMatch: { id: { in: $tagsIds } } }
         id: { ne: $id }
+        date: { lte: $currentDate }
       }
       sort: { date: DESC }
       limit: 6
@@ -57,6 +60,7 @@ export const pageQuery = graphql`
         draft: { ne: true }
         category: { id: { eq: $categoryId } }
         id: { ne: $id }
+        date: { lte: $currentDate }
       }
       sort: { date: DESC }
       limit: 6

@@ -17,6 +17,7 @@ module.exports = async (
   } = pluginOptions
 
   pageContextOptions.mobileMenu = await queryMobileMenu({ graphql })
+  pageContextOptions.currentDate = new Date().toISOString()
 
   //Create pagination for posts page if is required
   if (paginatePostsPage) {
