@@ -139,6 +139,11 @@ const Seo = ({
       titleTemplate={`%s | ${site.title}`}
       meta={metaTags}
       script={scripts}
+      link={[
+        { rel: 'icon', href: '/favicon.ico' },
+        { rel: 'shortcut icon', href: '/favicon.ico' },
+        { rel: 'apple-touch-icon', href: '/favicon.ico' }
+      ]}
     >
       {children}
     </Helmet>
