@@ -10,6 +10,7 @@ module.exports = async (
 
   pageContextOptions.mobileMenu = await queryMobileMenu({ graphql })
   pageContextOptions.currentDate = new Date().toISOString()
+  const currentDate = new Date()
 
   const result = await graphql(`
     {
@@ -23,6 +24,7 @@ module.exports = async (
             id
             slug
             link
+            date
             category {
               id
             }
@@ -43,7 +45,11 @@ module.exports = async (
   const posts = allArticle.edges
 
   posts.forEach(({ node }, index) => {
-    const { id, slug, category, tags, link } = node
+    const { id, slug, category, tags, link, date } = node
+
+    // Skip posts with future dates
+    const postDate = new Date(date)
+    if (postDate > currentDate) return
 
     if (link) return //skip creating pages for nodes linking to external sites
 
