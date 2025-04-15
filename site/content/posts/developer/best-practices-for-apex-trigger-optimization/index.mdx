@@ -1,0 +1,201 @@
+---
+title: Best Practices for Apex Trigger Optimization
+date: 2025-04-17T05:32:41.346Z
+author: Nick Huber
+category: Developer
+thumbnail: salesforce-jitterbit-integration-blog-img-1080x6282-2-.webp
+---
+# Best Practices for Apex Trigger Optimization
+
+Salesforce Apex Triggers are essential for automating business processes by executing custom logic before or after changes occur in Salesforce records. However, poorly written triggers can lead to performance issues, data inconsistencies, and frustrating debugging experiences. In this blog post, we’ll explore the **best practices for optimizing Apex triggers** to ensure your org remains **scalable, efficient, and maintainable**.
+
+## Why Trigger Optimization Matters
+
+Every time a record is inserted, updated, or deleted, the platform executes any associated triggers. If these are not properly designed, it can cause:
+
+- Governor limit exceptions
+- Recursive executions
+- Data integrity issues
+- Slow system performance
+
+That’s why following a consistent and optimized approach to trigger development is not optional—it’s crucial.
+
+---
+
+## One Trigger Per Object
+
+Avoid creating multiple triggers on the same object. Instead, **create one trigger per object** and manage logic execution through a dedicated handler class.
+
+### Example
+
+```apex
+trigger ContactTrigger on Contact (before insert, before update, after insert) {
+    ContactTriggerHandler.handleTrigger(Trigger.isBefore, Trigger.isAfter, Trigger.operationType, Trigger.new, Trigger.oldMap);
+}
+```
+
+This pattern improves maintainability and makes it easier to extend trigger logic without modifying the trigger itself.
+
+---
+
+## Use a Trigger Handler Framework
+
+Trigger handler frameworks are widely adopted to **separate trigger logic** from the trigger itself and to maintain consistency. Whether you roll your own or use a community-supported framework like Kevin O'Hara’s or FinancialForce’s, it provides structure and control.
+
+### Basic Trigger Handler Skeleton
+
+```apex
+public class ContactTriggerHandler {
+    public static void handleTrigger(Boolean isBefore, Boolean isAfter, System.TriggerOperation operationType, List<Contact> newList, Map<Id, Contact> oldMap) {
+        if (isBefore && operationType == System.TriggerOperation.BEFORE_INSERT) {
+            beforeInsert(newList);
+        }
+        // Add more conditions as needed
+    }
+
+    private static void beforeInsert(List<Contact> contacts) {
+        // Add business logic here
+    }
+}
+```
+
+---
+
+## Bulkify All Logic
+
+Never assume a trigger will only run on one record. Salesforce executes triggers in bulk by default (up to 200 records at a time). Therefore, all logic within the trigger **must support bulk operations**.
+
+### Anti-Pattern: SOQL Inside Loops
+
+```apex
+for (Account acc : Trigger.new) {
+    Contact c = [SELECT Id FROM Contact WHERE AccountId = :acc.Id LIMIT 1];
+}
+```
+
+### Optimized Bulkified Version
+
+```apex
+Set<Id> accountIds = new Set<Id>();
+for (Account acc : Trigger.new) {
+    accountIds.add(acc.Id);
+}
+Map<Id, Contact> contactMap = new Map<Id, Contact>([SELECT Id, AccountId FROM Contact WHERE AccountId IN :accountIds]);
+```
+
+This reduces the number of SOQL queries to one and ensures compliance with governor limits.
+
+---
+
+## Avoid Recursive Triggers
+
+A recursive trigger occurs when a DML operation within a trigger causes the same trigger to fire again. This can lead to infinite loops or reaching platform limits.
+
+### Use a Static Variable to Prevent Recursion
+
+```apex
+public class RecursionControl {
+    public static Boolean isFirstRun = true;
+}
+```
+
+```apex
+if (RecursionControl.isFirstRun) {
+    RecursionControl.isFirstRun = false;
+    // your logic here
+}
+```
+
+This pattern ensures the logic is only executed once per transaction.
+
+---
+
+## Minimize SOQL and DML Operations
+
+Governor limits for SOQL queries (100 per transaction) and DML operations (150 per transaction) can be easily hit with poorly optimized triggers.
+
+### Strategy to Reduce Limits Impact
+
+- Use `Map` and `Set` collections to handle records in bulk
+- Query only the fields you need
+- Avoid unnecessary DML operations (e.g., don’t update a record unless a field has actually changed)
+
+---
+
+## Use Context Variables Smartly
+
+Salesforce provides built-in **Trigger context variables** to help manage execution flow, such as:
+
+- `Trigger.isInsert`, `Trigger.isUpdate`, `Trigger.isDelete`
+- `Trigger.isBefore`, `Trigger.isAfter`
+- `Trigger.new`, `Trigger.old`, `Trigger.newMap`, `Trigger.oldMap`
+
+Use these to tailor your logic based on when and how the trigger is fired.
+
+### Example Use Case
+
+```apex
+if (Trigger.isUpdate) {
+    for (Account acc : Trigger.new) {
+        Account oldAcc = Trigger.oldMap.get(acc.Id);
+        if (acc.Industry != oldAcc.Industry) {
+            // Do something only if industry changed
+        }
+    }
+}
+```
+
+---
+
+## Error Handling and Logging
+
+Triggers should fail gracefully and provide meaningful error messages for debugging.
+
+### Custom Exception Example
+
+```apex
+if (someConditionFails) {
+    throw new TriggerException('Custom validation failed.');
+}
+
+public class TriggerException extends Exception {}
+```
+
+Also consider logging errors to a custom object or using a tool like Platform Events or Slack integrations for critical alerts.
+
+---
+
+## Testing Apex Triggers
+
+Proper testing is not just a best practice—it’s required for deployment.
+
+- Write unit tests that cover **bulk operations**
+- Include both **positive and negative scenarios**
+- Use `@testSetup` methods to prepare data
+- Assert outcomes with `System.assert()`
+
+### Example Test
+
+```apex
+@isTest
+private class ContactTriggerTest {
+    @isTest static void testBeforeInsert() {
+        List<Contact> contacts = new List<Contact>{
+            new Contact(LastName='Test 1'),
+            new Contact(LastName='Test 2')
+        };
+        insert contacts;
+
+        // Add assertions here
+        System.assertEquals(2, [SELECT COUNT() FROM Contact WHERE LastName LIKE 'Test%']);
+    }
+}
+```
+
+---
+
+## Conclusion
+
+Optimizing Apex triggers is essential to maintain a **healthy Salesforce org**. By following these best practices—**single trigger per object**, **bulkification**, **avoiding recursion**, and **efficient SOQL/DML usage**—you can ensure your automation is scalable and future-proof.
+
+**Have questions or want to share your trigger tips? Drop a comment below or check out our full guide on [Apex Trigger Context Variables](https://salesforcestack.com/salesforce-trigger-context-variables-explained/)!**
