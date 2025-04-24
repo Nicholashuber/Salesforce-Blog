@@ -1,0 +1,55 @@
+name: Create Blog Post
+
+on:
+  repository_dispatch:
+    types: [create-blog-post]
+
+jobs:
+  create-post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Blog Post
+        run: |
+          # Extract data from payload (direct fields, not under client_payload)
+          TITLE="${{ github.event.client_payload.title }}"
+          DATE="${{ github.event.client_payload.date }}"
+          AUTHOR="${{ github.event.client_payload.author || 'Niche.dev AI' }}"
+          CATEGORY="${{ github.event.client_payload.category || 'Blog' }}"
+          THUMBNAIL="${{ github.event.client_payload.thumbnail || '/assets/images/niche-blog-posts-image.png' }}"
+          EXCERPT="${{ github.event.client_payload.excerpt }}"
+          CONTENT="${{ github.event.client_payload.content }}"
+          
+          # Create filename from title (slugify) with fallback for empty titles
+          FILENAME=$(echo "${TITLE:-untitled-post}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
+          
+          # Create markdown file with frontmatter
+          cat > "_posts/$FILENAME.md" << EOF
+          ---
+          title: "$TITLE"
+          date: $DATE
+          author: "$AUTHOR"
+          thumbnail: $THUMBNAIL
+          thumbnail_small: /assets/images/blog/img-1-70x70.jpg
+          thumbnail_medium: $THUMBNAIL
+          thumbnail_large: /assets/images/blog/img-1-690x260.jpg
+          thumbnail_featured: /assets/images/blog/img-1-730x298.jpg
+          excerpt: $EXCERPT
+          category: "$CATEGORY"
+          comments: 0
+          layout: blog-post
+          permalink: /blog/{{ page.fileSlug }}/
+          ---
+
+          $CONTENT
+          EOF
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add _posts/
+          git commit -m "Add new blog post: ${{ github.event.client_payload.title }}" || echo "No changes to commit"
+          git push
