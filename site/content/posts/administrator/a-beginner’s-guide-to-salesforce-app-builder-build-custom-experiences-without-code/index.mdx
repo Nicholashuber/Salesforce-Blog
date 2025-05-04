@@ -1,0 +1,188 @@
+---
+title: "A Beginner’s Guide to Salesforce App Builder: Build Custom Experiences
+  Without Code"
+date: 2025-05-04T02:55:39.050Z
+author: Nick Huber
+category: Administrator
+thumbnail: salesforce-jitterbit-integration-blog-img-1080x6282-2-.webp
+---
+
+
+# A Beginner’s Guide to Salesforce App Builder: Build Custom Experiences Without Code
+
+The **Salesforce App Builder** is a powerful tool that allows Admins to create custom, flexible, and user-friendly Lightning Apps—all with clicks, not code.
+
+Whether you're designing record pages, home pages, or app-specific layouts, this guide walks you through everything you need to know to **master App Builder and elevate your org’s user experience**.
+
+---
+
+## What Is the Lightning App Builder?
+
+Lightning App Builder is a point-and-click interface for designing pages in Salesforce. You can drag and drop components to create:
+
+- **Record Pages** (e.g., Account, Opportunity)
+- **Home Pages** (user dashboards)
+- **App Pages** (custom app experiences)
+
+It supports both standard and custom components, visibility rules, and third-party integrations.
+
+---
+
+## Why Use App Builder?
+
+| Benefit | Description |
+|--------|-------------|
+| No coding required | Drag-and-drop UI for fast customization |
+| Personalized user experience | Customize layouts by profile or app |
+| Reusability | Build components once and reuse across pages |
+| Responsive design | Works across desktop and mobile |
+| Declarative logic | Use visibility filters for dynamic layouts |
+
+---
+
+## Page Types Explained
+
+### 1. **Record Pages**
+
+Customize how users view and interact with records. Great for:
+
+- Adding related lists, tabs, charts
+- Embedding Flows or components
+- Dynamic visibility of sections
+
+### 2. **Home Pages**
+
+Design dashboards, announcements, and task reminders on login.
+
+### 3. **App Pages**
+
+Build app-specific pages for business units or user roles.
+
+---
+
+## Key App Builder Components
+
+- **Standard Components**: Tabs, Related Lists, Chatter, Activities
+- **Custom Components**: Built with Aura or LWC
+- **Third-party Components**: Installed from AppExchange
+- **Dynamic Forms**: Show/hide fields based on logic
+- **Report Charts**: Visuals tied to dashboards
+
+---
+
+## Creating a Lightning App Page (Step-by-Step)
+
+### Example: Sales Productivity Page
+
+1. Navigate to **Setup > Lightning App Builder**
+2. Click **New** > Select **App Page**
+3. Name the page: “Sales Dashboard”
+4. Choose **1 Region** or **2 Columns Layout**
+5. Drag components:
+   - **Today’s Tasks**
+   - **Opportunity Pipeline Chart**
+   - **Recent Opportunities List View**
+6. Save and **Activate**
+7. Assign to **Sales App** and profiles
+
+---
+
+## Using Dynamic Visibility Rules
+
+You can control component visibility based on:
+
+- **Field values** (e.g., Stage = Closed Won)
+- **User Profile**
+- **Record Type**
+- **Device type** (mobile vs desktop)
+
+This allows a personalized experience per user.
+
+---
+
+## Example: Manager-Only Component
+
+Add a “KPI Summary” chart visible **only to users with Profile = Sales Manager**.
+
+**Rule Setup**:
+
+- `Advanced Visibility Rule`
+- `Profile.Name = "Sales Manager"`
+
+Now reps won’t see clutter they don’t need.
+
+---
+
+## Best Practices for Using App Builder
+
+### 1. Plan Your Layout
+
+Sketch before building. Focus on priority data and key actions.
+
+### 2. Use Tabs and Accordions
+
+Avoid long scroll pages by organizing into tabs or collapsible sections.
+
+### 3. Keep Mobile in Mind
+
+Test layouts on the Salesforce Mobile App for responsiveness.
+
+### 4. Minimize Components per Page
+
+Too many components can slow page loads. Keep it focused.
+
+### 5. Document Your Pages
+
+Track custom pages and their assignments for maintenance.
+
+---
+
+## Real-World Use Case: Custom Case Management Page
+
+### Goal:
+
+Give support reps an efficient view for managing open cases.
+
+### Solution:
+
+- Base: Custom Case Record Page
+- Tabs:
+  - Case Details
+  - Related Contacts
+  - Knowledge Articles
+- Dynamic Components:
+  - Escalation Info (shown only if `Status = Escalated`)
+  - SLA Countdown (based on priority)
+
+Outcome: Faster resolution, cleaner UI, better adoption.
+
+---
+
+## Tools That Complement App Builder
+
+| Tool | Use |
+|------|-----|
+| Lightning Flow | Embed business logic in pages |
+| Dynamic Forms | Field-level control without layouts |
+| Custom Metadata | Drive visibility logic |
+| AppExchange Components | Enhance functionality |
+| Report Builder | Feed dashboard components |
+
+---
+
+## Common Mistakes to Avoid
+
+| Mistake | Fix |
+|--------|-----|
+| Too many items on a single page | Break into tabs or simplify |
+| Ignoring mobile experience | Always preview in mobile view |
+| Showing same layout to all profiles | Use visibility rules |
+| Not documenting layouts | Maintain an admin guide |
+
+---
+
+## Conclusion
+
+Lightning App Builder empowers Admins to create tailored user experiences that increase productivity and drive adoption—all without touching a single line of code.
+
+**Want a ready-to-use Lightning Page layout template? Drop a comment below and we’ll send over our top 3 admin-tested layouts for sales, support, and onboarding!**
