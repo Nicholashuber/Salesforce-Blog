@@ -1,0 +1,176 @@
+---
+title: "Getting Started with Salesforce Sharing Rules: A Practical Guide for Admins"
+date: 2025-06-30T22:59:00.000Z
+author: Nick Huber
+category: Administrator
+thumbnail: salesforce-jitterbit-integration-blog-img-1080x6282.webp
+---
+
+
+# Getting Started with Salesforce Sharing Rules: A Practical Guide for Admins
+
+Proper data access is at the heart of every successful Salesforce implementation. While Organization-Wide Defaults and Roles control baseline access, **Sharing Rules** give Admins the flexibility to grant access based on real business needs.
+
+In this practical guide, we’ll break down how to use **Salesforce Sharing Rules** to open up record access safely and strategically—**without compromising data security**.
+
+---
+
+## What Are Sharing Rules?
+
+Sharing Rules allow Admins to **extend record access beyond the role hierarchy**. They are declarative configurations that open up access based on:
+
+- Record Owner
+- Criteria (field values)
+- Public Groups, Roles, or Territories
+
+---
+
+## Why Sharing Rules Matter
+
+| Benefit | Description |
+|--------|-------------|
+| Scalable access control | Extend visibility without changing roles |
+| Least privilege model | Maintain security while improving usability |
+| Simplified admin management | Declarative, no-code setup |
+| Improved collaboration | Share across departments or regions |
+
+---
+
+## Types of Sharing Rules
+
+1. **Owner-Based Sharing Rules**  
+   Grants access based on **who owns the record**.
+
+2. **Criteria-Based Sharing Rules**  
+   Grants access based on **field values** (e.g., Region = “West”).
+
+3. **Guest User Sharing Rules**  
+   Extends access to unauthenticated users via Experience Cloud.
+
+---
+
+## Sharing Rule Capabilities by Object Type
+
+| Object | Supports Criteria-Based? | Supports Owner-Based? |
+|--------|--------------------------|------------------------|
+| Standard Objects (e.g., Account) | ✅ | ✅ |
+| Custom Objects | ✅ | ✅ |
+| Activities (Tasks/Events) | ❌ | ✅ |
+| Campaigns, Opportunities | ✅ | ✅ |
+
+---
+
+## How to Create a Sharing Rule
+
+### Step-by-Step:
+
+1. Go to **Setup → Sharing Settings**
+2. Choose the object (e.g., Account)
+3. Click **New Sharing Rule**
+4. Select **Based on owner** or **Based on criteria**
+5. Define the source (who) and target (who gets access)
+6. Choose access level: **Read Only** or **Read/Write**
+7. Save and deploy
+
+---
+
+## Real-World Example: Sharing Opportunities by Region
+
+### Scenario:
+
+West Coast Sales team needs to see all Opportunities with Region = "West".
+
+### Solution:
+
+- Create a **Criteria-Based Sharing Rule**
+- Object: Opportunity
+- Criteria: `Region__c = 'West'`
+- Share with: Public Group “West Sales”
+- Access: Read/Write
+
+Now reps outside the owner hierarchy can collaborate on deals.
+
+---
+
+## Using Public Groups for Flexibility
+
+Public Groups simplify sharing rule maintenance.
+
+**Why use Public Groups?**
+
+- Combine users, roles, and territories
+- Use the same group in multiple rules
+- Easier to manage than custom roles
+
+**Example**: Public Group = Support Leadership  
+Includes: Role = Support Manager, User = ExternalConsultant
+
+---
+
+## Monitoring and Troubleshooting Sharing
+
+### Tools for Admins:
+
+- **Sharing Button** on records (classic only or via Lightning component)
+- **Why Can’t I See This Record?** Lightning feature
+- **Debug Logs** for manual sharing triggers
+- **Sharing Settings Reports** (custom-built)
+
+---
+
+## Common Use Cases for Sharing Rules
+
+| Use Case | Type |
+|----------|------|
+| Share high-value Accounts with Legal | Owner-Based |
+| Open read-only access to East Region Cases | Criteria-Based |
+| Let partner users view certain Opportunities | Criteria-Based |
+| Make all Product records visible to Marketing | Owner-Based |
+
+---
+
+## Tips and Best Practices
+
+### 1. Keep It Simple
+
+Avoid excessive sharing rules—combine where possible.
+
+### 2. Use Groups Instead of Roles
+
+They’re easier to manage and more flexible.
+
+### 3. Review Sharing Hierarchy Regularly
+
+Ensure rules still align with organizational structure and compliance.
+
+### 4. Avoid Performance Bottlenecks
+
+Too many sharing rules can impact sharing recalculations during data updates.
+
+---
+
+## Advanced Options
+
+- **Apex Managed Sharing**: Custom logic via code for complex scenarios
+- **Manual Sharing**: One-off record sharing by owners
+- **Territory Model Sharing**: Advanced field sales orgs
+- **Sharing Sets**: For Experience Cloud users
+
+---
+
+## Limitations to Be Aware Of
+
+| Limitation | Detail |
+|------------|--------|
+| Read/Write only | Cannot grant delete access |
+| Lookup fields | Can’t drive criteria from related object fields |
+| Activities | Limited to owner-based sharing |
+| Recalculation delay | Rules take time to apply to large datasets |
+
+---
+
+## Conclusion
+
+Salesforce Sharing Rules provide Admins with a powerful way to **expand access while maintaining control**. By using Owner- and Criteria-Based rules strategically, you can support collaboration, enforce security, and ensure users get the access they need—no more, no less.
+
+**Need a sharing rule planning worksheet or example configurations? Drop a comment and we’ll send over a customizable template!**
