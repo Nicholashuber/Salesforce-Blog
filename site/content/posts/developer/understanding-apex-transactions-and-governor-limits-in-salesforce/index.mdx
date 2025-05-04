@@ -1,0 +1,217 @@
+---
+title: Understanding Apex Transactions and Governor Limits in Salesforce
+date: 2025-05-07T20:37:00.000Z
+author: Nick Huber
+category: Developer
+thumbnail: salesforce-jitterbit-integration-blog-img-1080x6282.webp
+---
+
+
+# Understanding Apex Transactions and Governor Limits in Salesforce
+
+Salesforce’s multitenant architecture ensures that resources are shared fairly among tenants. To maintain performance and stability, Salesforce enforces **governor limits**—thresholds that Apex code must stay within during execution.
+
+This blog post demystifies **Apex transactions**, explains critical **governor limits**, and provides actionable strategies to ensure your automation scales without breaking.
+
+---
+
+## What Is an Apex Transaction?
+
+An **Apex transaction** is a set of operations that execute as a single unit. If one operation fails, the entire transaction is rolled back.
+
+### Examples of Apex Transactions:
+
+- A trigger firing during a record update
+- An Apex class invoked via Flow or Process Builder
+- A REST API call that invokes Apex logic
+
+Each transaction is bounded by its **governor limits**.
+
+---
+
+## Why Do Governor Limits Exist?
+
+Salesforce’s multitenancy model means thousands of orgs run on the same infrastructure. Governor limits:
+
+- Ensure fair resource distribution
+- Prevent runaway code from degrading system performance
+- Encourage efficient coding practices
+
+---
+
+## Key Apex Governor Limits to Know
+
+| Limit | Value (Synchronous) |
+|-------|---------------------|
+| Total SOQL queries | 100 |
+| Total DML statements | 150 |
+| CPU time | 10,000 ms |
+| Heap size | 6 MB |
+| Callouts | 100 |
+| Records retrieved by SOQL | 50,000 |
+| Future method calls | 50 |
+| Queueable jobs added | 50 |
+
+**Note**: Asynchronous limits differ and are generally more lenient.
+
+---
+
+## Understanding Limit Usage
+
+Use the `Limits` class to monitor resource usage in real-time:
+
+```apex
+System.debug('SOQL queries used: ' + Limits.getQueries());
+System.debug('SOQL queries limit: ' + Limits.getLimitQueries());
+```
+
+You can also use this dynamically in logic to prevent limit overrun.
+
+---
+
+## Tips to Avoid Governor Limit Errors
+
+### 1. **Bulkify Apex Code**
+
+Never assume one record per transaction. Use `Trigger.new` as a collection.
+
+**Bad:**
+
+```apex
+for (Account acc : Trigger.new) {
+    insert new Contact(LastName = 'Test', AccountId = acc.Id);
+}
+```
+
+**Good:**
+
+```apex
+List<Contact> contacts = new List<Contact>();
+for (Account acc : Trigger.new) {
+    contacts.add(new Contact(LastName = 'Test', AccountId = acc.Id));
+}
+insert contacts;
+```
+
+### 2. **Avoid SOQL/DML in Loops**
+
+Querying or performing DML inside loops is a surefire way to hit limits.
+
+### 3. **Use Collections and Maps**
+
+Aggregate data using maps and sets to optimize lookups and avoid duplicate processing.
+
+---
+
+## Asynchronous Apex and Limits
+
+When your code needs to do more than what synchronous limits allow, go **asynchronous**.
+
+### Options:
+
+- **Future Methods**
+- **Queueable Apex**
+- **Batch Apex**
+- **Scheduled Apex**
+
+Each has its own use case and limit thresholds.
+
+---
+
+### Example: Queueable Apex
+
+```apex
+public class MyQueueableJob implements Queueable {
+    public void execute(QueueableContext context) {
+        // logic here
+    }
+}
+System.enqueueJob(new MyQueueableJob());
+```
+
+Use Queueables for chaining jobs and handling larger data volumes.
+
+---
+
+## Transaction Boundaries in Triggers
+
+A single DML action (e.g., mass update of records) can fire multiple triggers, but they execute as **one transaction**.
+
+This means:
+
+- All changes are committed together
+- Limits are shared across all involved logic
+- Rollbacks affect the entire transaction
+
+**Always test bulk scenarios** to ensure compliance under realistic data volumes.
+
+---
+
+## Exception Handling in Apex Transactions
+
+Use try/catch blocks to gracefully handle exceptions and prevent full rollbacks when possible.
+
+```apex
+try {
+    insert someRecords;
+} catch (DmlException ex) {
+    // Log error, send notification
+}
+```
+
+---
+
+## Monitoring and Debugging Governor Limits
+
+### Tools:
+
+- **Debug Logs**: View SOQL, DML, CPU usage
+- **Developer Console**: Monitor executions
+- **Apex Test Execution**: Validate unit tests against limits
+- **Salesforce Optimizer**: Highlights limit-heavy components
+
+---
+
+## Advanced Techniques
+
+### 1. Use Platform Events
+
+Offload operations to asynchronous subscribers via Platform Events.
+
+### 2. Split Data Batches
+
+If working with large data volumes, process them in smaller chunks to stay under limits.
+
+### 3. Transaction Finalizers
+
+In Queueable Apex, use `System.finalizer` to run post-processing logic regardless of success/failure.
+
+---
+
+## Real-World Scenario: Mass Lead Reassignment
+
+Suppose you’re reassigning 10,000 leads to a new owner.
+
+**Bad Approach:**
+
+```apex
+for (Lead l : allLeads) {
+    l.OwnerId = newOwnerId;
+    update l;
+}
+```
+
+**Good Approach:**
+
+- Chunk data into 200 record batches
+- Use Queueable Apex for processing
+- Monitor each job’s limit usage
+- Log failures using Custom Object or Platform Events
+
+---
+
+## Conclusion
+
+Understanding Apex transactions and governor limits is fundamental for writing **efficient, scalable, and reliable** Salesforce code. Whether you're optimizing triggers, classes, or integrations, respect for limits ensures your org stays stable and your automation performs flawlessly.
+
+**Need help optimizing a transaction-heavy process? Drop your scenario in the comments and let’s troubleshoot together!**
