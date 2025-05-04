@@ -1,0 +1,185 @@
+---
+title: Building Scalable Salesforce Integrations with Platform Events
+date: 2025-05-04T19:33:00.000Z
+author: Nick Huber
+category: Developer
+thumbnail: salesforce-jitterbit-integration-blog-img-1080x6282.webp
+keywords:
+  - salesforce
+  - platform
+  - events
+  - scalable
+  - bulk
+---
+
+
+# Building Scalable Salesforce Integrations with Platform Events
+
+In today’s API-driven landscape, real-time integration is key. Salesforce Platform Events provide a powerful **event-driven architecture** that helps developers build **scalable, loosely-coupled integrations** across systems.
+
+In this comprehensive guide, you'll learn how to use Platform Events to build responsive, scalable, and maintainable integrations inside and outside of Salesforce.
+
+---
+
+## What Are Platform Events?
+
+Platform Events are part of Salesforce’s **Event-Driven Architecture (EDA)**, allowing systems to communicate through **publish-subscribe models**. Instead of querying for changes or writing synchronous APIs, you publish and subscribe to events asynchronously.
+
+### Key Benefits:
+
+- **Real-time communication** between systems
+- **Decoupling** of apps and logic
+- **Improved scalability** via asynchronous processing
+- **Transaction boundary control**
+
+---
+
+## Platform Events vs Traditional Integration
+
+| Feature | Platform Events | REST API | Outbound Messaging |
+|--------|------------------|---------|--------------------|
+| Real-time | ✅ | ✅ | ✅ |
+| Asynchronous | ✅ | ❌ | ✅ |
+| Retry logic | ✅ | ❌ | ❌ |
+| Order of execution | ✅ | ❌ | ❌ |
+| Declarative support | ✅ | ❌ | ✅ |
+
+---
+
+## When to Use Platform Events
+
+- Notify external systems when data changes
+- Integrate with middleware like MuleSoft, AWS, or Kafka
+- Trigger downstream actions from Apex or Flows
+- Replace Outbound Messaging with more reliability
+
+---
+
+## Creating a Platform Event
+
+1. Go to **Setup → Platform Events**
+2. Click **New Platform Event**
+3. Define the name (e.g., `Order_Event__e`)
+4. Add custom fields like `OrderId__c`, `Status__c`, or `CustomerEmail__c`
+5. Click Save
+
+Platform Events use the `__e` suffix and behave like sObjects.
+
+---
+
+## Publishing Events from Apex
+
+Publishing a Platform Event is as simple as inserting a record:
+
+```apex
+Order_Event__e event = new Order_Event__e(
+    OrderId__c = '12345',
+    Status__c = 'Shipped',
+    CustomerEmail__c = 'user@example.com'
+);
+Database.SaveResult sr = EventBus.publish(event);
+```
+
+You can publish from Apex triggers, classes, or even Flow Builder.
+
+---
+
+## Subscribing to Platform Events
+
+### 1. **Apex Trigger on Platform Events**
+
+```apex
+trigger OrderEventTrigger on Order_Event__e (after insert) {
+    for (Order_Event__e evt : Trigger.new) {
+        System.debug('Received Order ID: ' + evt.OrderId__c);
+        // Execute business logic
+    }
+}
+```
+
+### 2. **Process Builder or Flow**
+
+You can create declarative subscribers in Flow Builder that listen to Platform Events and execute logic like record creation or email alerts.
+
+### 3. **External Subscribers**
+
+External systems (e.g., AWS Lambda, Node.js apps) can subscribe via CometD using Salesforce’s Streaming API.
+
+---
+
+## Real-World Use Case: Ecommerce Order Processing
+
+1. **Salesforce** publishes an event when an order is marked "Shipped".
+2. **AWS Lambda** listens and updates shipping labels via an external API.
+3. **Slack Bot** posts an order shipment update.
+4. **Salesforce** triggers follow-up task creation via Flow.
+
+This architecture is fully **asynchronous**, **event-driven**, and **scalable**.
+
+---
+
+## Best Practices for Platform Events
+
+### 1. Monitor Replay IDs
+
+Use replay IDs for durable subscriptions and **guaranteed delivery** in case of disconnections.
+
+### 2. Limit Event Volume
+
+Platform Events are subject to limits (e.g., 150K events/day for Enterprise Edition). Monitor usage via Event Monitoring.
+
+### 3. Batch Processing
+
+Use Apex triggers with future or queueable classes for processing to avoid long-running operations.
+
+### 4. Use EventBus.publish()
+
+Use `EventBus.publish()` to publish events instead of DML for enhanced control and error handling.
+
+### 5. Test with `Test.startTest()` and `Test.stopTest()`
+
+Use `Test.getEventBus().deliver()` in unit tests for reliable testing of event-based logic.
+
+---
+
+## Platform Events vs Change Data Capture (CDC)
+
+| Feature | Platform Events | Change Data Capture |
+|--------|------------------|---------------------|
+| Custom fields | ✅ | ❌ |
+| Data change tracking | ❌ | ✅ |
+| External consumption | ✅ | ✅ |
+| Triggers support | ✅ | ✅ |
+| Built-in object support | ❌ | ✅ (standard & custom objects) |
+
+Use **CDC for tracking changes** and **Platform Events for broadcasting messages** across apps.
+
+---
+
+## Monitoring & Debugging
+
+### Tools:
+
+- **Event Monitoring Logs**: Track published/subscribed events
+- **CometD Clients**: Use Postman or JavaScript clients to test subscriptions
+- **Debug Logs**: Capture Apex trigger logs on events
+- **Transaction Finalizer**: Ensure retry logic for external system sync
+
+---
+
+## Scaling Tips for Large Orgs
+
+- Batch-trigger processing with **Queueable Apex**
+- Create **custom retry logic** for failed subscribers
+- Split event schemas by function (e.g., `Shipping_Event__e`, `Inventory_Event__e`)
+- Use **platform cache** or **custom metadata** to throttle volumes
+
+---
+
+## Conclusion
+
+Platform Events are a cornerstone for modern, scalable Salesforce integrations. They provide the speed, flexibility, and decoupling needed to build reliable cross-system architectures.
+
+**Start using Platform Events today to unlock true real-time automation in Salesforce.**
+
+**Need help architecting your integration? Drop your scenario in the comments, and let’s discuss the best event-driven design!**
