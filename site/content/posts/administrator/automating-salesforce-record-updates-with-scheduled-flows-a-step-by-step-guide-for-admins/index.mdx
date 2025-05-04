@@ -1,0 +1,151 @@
+---
+title: "Automating Salesforce Record Updates with Scheduled Flows: A
+  Step-by-Step Guide for Admins"
+date: 2025-05-19T19:45:00.000Z
+author: Nick Huber
+category: Administrator
+thumbnail: salesforce-jitterbit-integration-blog-img-1080x6282-2-.webp
+---
+
+# Automating Salesforce Record Updates with Scheduled Flows: A Step-by-Step Guide for Admins
+
+Scheduled Flows are one of the most powerful tools Salesforce has given Admins in recent years. They let you run automations **at specific times without code**, making them ideal for everything from daily data updates to time-based business logic.
+
+In this guide, we’ll walk through everything you need to know to **master Scheduled Flows**, including real-world use cases, best practices, and setup instructions—without touching Apex.
+
+---
+
+## What Are Scheduled Flows?
+
+A **Scheduled Flow** is a type of **Autolaunched Flow** that runs automatically at specified intervals (daily, weekly, or a custom schedule).
+
+Unlike record-triggered flows, these don’t wait for data changes—they **proactively scan and act** on records matching your criteria.
+
+---
+
+## Benefits of Using Scheduled Flows
+
+- No need for Apex code or scheduled batch classes
+- Fully declarative and admin-friendly
+- Run flows on a schedule (e.g., every night at 2am)
+- Great for maintenance tasks, time-based actions, and periodic updates
+
+---
+
+## When to Use Scheduled Flows
+
+| Use Case | Example |
+|----------|---------|
+| Data cleanup | Reset flags or outdated records nightly |
+| Time-based status updates | Move expired Opportunities to “Closed Lost” |
+| Auto-reminders | Flag records due for follow-up |
+| Process renewals | Trigger actions for Contracts expiring in 30 days |
+| SLA monitoring | Escalate Cases not updated in 72 hours |
+
+---
+
+## How to Create a Scheduled Flow
+
+### Step-by-Step:
+
+1. Go to **Setup > Flows** → Click **New Flow**
+2. Select **Scheduled-Triggered Flow**
+3. Set schedule (start date, frequency, and time)
+4. Define **Entry Conditions** (optional)
+   - Example: `Status = Open AND LastModifiedDate < TODAY() - 5`
+5. Use **Get Records** to pull data
+6. Apply logic: Assignments, Decisions, Create/Update/Delete
+7. Save and **Activate**
+
+---
+
+## Real-World Example: Auto-Close Stale Opportunities
+
+### Objective:
+
+Automatically close Opportunities that haven’t been updated in 60 days and are still Open.
+
+### Steps:
+
+1. **Schedule**: Run nightly at 1am
+2. **Get Records**:
+   - Object: Opportunity
+   - Filter: `StageName != 'Closed Won' AND LastModifiedDate < TODAY() - 60`
+3. **Loop**: For each Opportunity, set `StageName = 'Closed Lost'`
+4. **Update Records**: Save the changes
+
+You’ve now automated a common sales hygiene task—without any code.
+
+---
+
+## Best Practices for Scheduled Flows
+
+### 1. Test in Sandbox First
+
+Run test versions using narrow filters and confirm updates with debug logs or test reports.
+
+### 2. Use Fault Paths
+
+Always connect flow elements to **Fault connectors** to catch errors and log them appropriately.
+
+### 3. Keep Limits in Mind
+
+Salesforce limits the number of records a flow can process. Use filters to stay below thresholds or break up jobs.
+
+- **50K records per execution**
+- **Scheduled flows run in batch context**
+
+### 4. Use Email Alerts or Logging
+
+Send notifications on success/failure, or write outcomes to a custom Log object for tracking.
+
+---
+
+## Tools to Pair with Scheduled Flows
+
+- **Custom Metadata Types** – Drive dynamic logic like thresholds or trigger windows
+- **Queues** – Assign records to a queue after updates
+- **Reports** – Monitor flow effectiveness via dashboards
+- **Permission Sets** – Secure flow access for admins only
+
+---
+
+## Monitoring Flow Execution
+
+Use **Setup > Scheduled Jobs** to confirm scheduled flow runs and inspect any failures.
+
+Also:
+
+- Use **Debug Logs** during testing
+- Build **Flow Error Reports** for non-admin monitoring
+
+---
+
+## Common Mistakes to Avoid
+
+| Mistake | Fix |
+|--------|-----|
+| Not testing entry criteria | Preview record count via report first |
+| No fault connectors | Always handle errors |
+| Overloading flow logic | Use Subflows for modular design |
+| Processing too many records | Filter down or use batch strategies |
+
+---
+
+## Bonus: Dynamic Scheduling Using Custom Metadata
+
+Advanced Admins can control schedule logic using CMDTs. Example:
+
+- CMDT record stores “SLA Days = 3”
+- Flow calculates if Case last touched date > SLA Days
+- Automatically flags or escalates
+
+This makes your Scheduled Flows **configurable without editing the Flow** itself.
+
+---
+
+## Conclusion
+
+Scheduled Flows allow Salesforce Admins to automate repetitive tasks, enforce time-based processes, and manage data proactively—without ever touching Apex. Mastering them gives you powerful control over your org’s business processes.
+
+**Need help designing your first Scheduled Flow? Drop your use case in the comments and we’ll help you architect the solution!**
