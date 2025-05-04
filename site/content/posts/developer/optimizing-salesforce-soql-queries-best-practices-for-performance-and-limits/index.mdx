@@ -1,0 +1,237 @@
+---
+title: "Optimizing Salesforce SOQL Queries: Best Practices for Performance and Limits"
+date: 2025-05-04T19:29:00.000Z
+author: Nick Huber
+category: Developer
+thumbnail: salesforce-jitterbit-integration-blog-img-1080x6282.webp
+keywords:
+  - soql
+  - query
+  - salesforce
+  - apex
+---
+
+
+
+# Optimizing Salesforce SOQL Queries: Best Practices for Performance and Limits
+
+When it comes to performance in Salesforce, **SOQL (Salesforce Object Query Language)** is often the most underestimated component. Poorly written SOQL queries can lead to governor limit exceptions, slow page loads, and failed batch jobs.
+
+In this blog post, you’ll learn how to write **high-performance, governor-friendly SOQL queries**. Whether you're a developer, architect, or admin working with Apex or automation tools, this guide will help you **optimize every line of your SOQL**.
+
+---
+
+## Why SOQL Optimization Matters
+
+Salesforce enforces governor limits to ensure efficient resource usage in its multi-tenant environment. These limits include:
+
+- 100 SOQL queries per synchronous transaction
+- 50,000 total records retrieved
+- 6 million characters of data returned
+
+**Inefficient SOQL usage is the #1 cause of hitting governor limits**. By optimizing your queries, you enhance performance and reduce errors across Apex, Flows, and Integrations.
+
+---
+
+## Basic Principles of SOQL
+
+Before jumping into advanced techniques, master these fundamentals:
+
+- **SELECT** fields from an object
+- Use **WHERE** to filter results
+- Order results with **ORDER BY**
+- Limit output with **LIMIT**
+
+### Example:
+
+```apex
+SELECT Id, Name FROM Account WHERE CreatedDate = LAST_N_DAYS:30 ORDER BY Name ASC LIMIT 50
+```
+
+---
+
+## Best Practices for Writing Efficient SOQL
+
+### 1. Use Selective Filters
+
+Avoid broad queries like `SELECT Id FROM Account`. Use filters on indexed fields (e.g., Id, Name, CreatedDate).
+
+**Bad:**
+
+```apex
+SELECT Id FROM Contact WHERE LastName != null
+```
+
+**Good:**
+
+```apex
+SELECT Id FROM Contact WHERE Email LIKE '%@company.com'
+```
+
+### 2. Use Only Required Fields
+
+Fetching unnecessary fields increases data load and impacts performance.
+
+**Bad:**
+
+```apex
+SELECT * FROM Opportunity
+```
+
+**Good:**
+
+```apex
+SELECT Id, StageName, Amount FROM Opportunity
+```
+
+### 3. Use Limits Wisely
+
+Limit your results when you only need a subset.
+
+```apex
+SELECT Id FROM Lead WHERE Status = 'Open' LIMIT 10
+```
+
+---
+
+## Using Relationship Queries
+
+SOQL supports both **parent-to-child** and **child-to-parent** relationships.
+
+### Child-to-Parent:
+
+```apex
+SELECT Id, Account.Name FROM Contact WHERE LastName = 'Smith'
+```
+
+### Parent-to-Child (Subquery):
+
+```apex
+SELECT Name, (SELECT LastName FROM Contacts) FROM Account
+```
+
+Avoid overfetching child records, especially in batch operations.
+
+---
+
+## Indexed Fields and Query Selectivity
+
+Salesforce query optimizer relies on **selective queries**. To be selective:
+
+- Use indexed fields
+- Return fewer than 10% of the total rows
+- Avoid `NOT`, `!=`, or `LIKE '%value%'`
+
+### Use Query Plan Tool
+
+1. In Developer Console, go to **Query Plan**
+2. Paste your SOQL
+3. Analyze cost and selectivity
+
+---
+
+## Avoid SOQL in Loops
+
+The most common anti-pattern in Apex:
+
+```apex
+for (Account acc : accounts) {
+    List<Contact> contacts = [SELECT Id FROM Contact WHERE AccountId = :acc.Id];
+}
+```
+
+### Fix: Bulkify with IN clause
+
+```apex
+Set<Id> accountIds = new Set<Id>();
+for (Account acc : accounts) {
+    accountIds.add(acc.Id);
+}
+List<Contact> allContacts = [SELECT Id FROM Contact WHERE AccountId IN :accountIds];
+```
+
+---
+
+## Use Query Aggregates and GROUP BY
+
+SOQL supports aggregates like COUNT(), SUM(), and GROUP BY for reporting-style queries.
+
+```apex
+SELECT StageName, COUNT(Id) FROM Opportunity GROUP BY StageName
+```
+
+Use this for dashboards, analytics, or reporting without exporting data.
+
+---
+
+## Optimize Queries for Large Data Volumes (LDV)
+
+When working with 1M+ records:
+
+- Always use **indexed fields**
+- Use **skinny tables** if approved by Salesforce
+- Query in **batches** with LIMIT and OFFSET
+- Use **Batch Apex** or **SOQL for loops**
+
+### Batch Apex Example:
+
+```apex
+global class LargeAccountProcessor implements Database.Batchable<SObject> {
+    global Database.QueryLocator start(Database.BatchableContext BC) {
+        return Database.getQueryLocator('SELECT Id FROM Account WHERE IsActive__c = true');
+    }
+    global void execute(Database.BatchableContext BC, List<SObject> scope) {
+        // Processing logic
+    }
+    global void finish(Database.BatchableContext BC) {}
+}
+```
+
+---
+
+## Monitoring SOQL Usage
+
+### 1. Developer Console
+
+- View SOQL logs
+- Analyze execution time
+
+### 2. Debug Logs
+
+Enable Apex debug logs and search for `SOQL_EXECUTE_BEGIN` and `SOQL_EXECUTE_END`.
+
+### 3. Salesforce Optimizer Report
+
+Run it from Setup to identify performance risks in your org.
+
+---
+
+## Common Mistakes to Avoid
+
+| Mistake | Impact |
+|--------|--------|
+| Using SELECT * | Fetches unused data |
+| SOQL in loops | Governor limits |
+| No filters | Full table scan |
+| Too many fields | Slower performance |
+| Not testing in sandbox | Unexpected failures |
+
+---
+
+## Tools for SOQL Optimization
+
+- **Query Plan Tool**
+- **Salesforce Optimizer**
+- **Workbench**
+- **Developer Console**
+- **Apex PMD (Code Quality)**
+
+---
+
+## Conclusion
+
+SOQL is more than just a query language—it's a performance tool. Writing efficient SOQL helps avoid limits, speeds up transactions, and improves user experience.
+
+Start auditing your existing queries today. **Optimize, refactor, and test your SOQL for long-term success.**
+
+**Have a query you'd like reviewed? Drop it in the comments or check out our SOQL optimization checklist!**
