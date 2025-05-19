@@ -17,6 +17,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "gatsby-plugin-google-gtag": "^5.11.0"
+    "gatsby-plugin-google-gtag": "^5.11.0",
+    "gatsby-plugin-sitemap": "^6.14.0"
   }
 }
