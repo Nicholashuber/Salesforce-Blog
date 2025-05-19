@@ -53,6 +53,7 @@ module.exports = {
   siteMetadata: {
     //General Site Metadata
     title: 'SalesforceStack Blog',
+    siteUrl: process.env.URL || process.env.VERCEL_URL,
     name: 'SalesforceStack',
     description: 'Explore the world of Salesforce with expert insights, code examples, and community contributions. Your one-stop hub for everything Salesforce.',
     address: 'New York, NY',
