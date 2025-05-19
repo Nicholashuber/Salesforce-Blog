@@ -35,7 +35,57 @@ module.exports = {
     {
       resolve: 'gatsby-plugin-sitemap',
       options: {
-        // The plugin automatically uses your siteUrl from the theme options
+        query: `
+        {
+          allSitePage {
+            nodes {
+              path
+            }
+          }
+          site {
+            siteMetadata {
+              siteUrl
+            }
+          }
+          allArticle {
+            nodes {
+              slug
+              date
+            }
+          }
+        }
+        `,
+        resolveSiteUrl: ({site}) => site.siteMetadata.siteUrl,
+        resolvePages: ({ allSitePage: { nodes: allPages }, allArticle: { nodes: allArticles } }) => {
+          const articleMap = allArticles.reduce((acc, article) => {
+            if (article.slug) {
+              acc[article.slug] = article;
+            }
+            return acc;
+          }, {});
+
+          return allPages.map(page => {
+            return {
+              ...page,
+              ...articleMap[page.path]
+            };
+          });
+        },
+        serialize: ({ path, date }) => {
+          let entry = {
+            url: path,
+            changefreq: 'daily',
+            priority: 0.7
+          };
+
+          // Add lastmod if we have a date
+          if (date) {
+            entry.lastmod = date;
+          }
+
+          return entry;
+        },
+        output: '/',
       }
     },
     {
