@@ -33,6 +33,12 @@ module.exports = {
       },
     },
     {
+      resolve: 'gatsby-plugin-sitemap',
+      options: {
+        // The plugin automatically uses your siteUrl from the theme options
+      }
+    },
+    {
       /////resolve: '@elegantstack/gatsby-theme-flexiblog-science',
       resolve: '@elegantstack/gatsby-theme-flexiblog-agency',
       options: {
