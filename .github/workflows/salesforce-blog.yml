@@ -1,0 +1,95 @@
+name: Sync Blog Posts
+
+# Drop this file into the Salesforce-Blog repo at .github/workflows/sync-blog-posts.yml
+# Required repo secrets:
+#   BLOG_AUTOMATION_URL  -> https://your-blog-automation.up.railway.app
+#   BLOG_AUTOMATION_KEY  -> the API key shown when you created the site (or after rotating it)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SITE: salesforce-blog
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch pending posts
+        id: fetch
+        env:
+          API_URL: ${{ secrets.BLOG_AUTOMATION_URL }}
+          API_KEY: ${{ secrets.BLOG_AUTOMATION_KEY }}
+        run: |
+          set -euo pipefail
+          posts=$(curl -fsS -H "Authorization: Bearer $API_KEY" "$API_URL/api/sites/$SITE/posts/pending")
+          count=$(echo "$posts" | jq 'length')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          : > pending-ids.txt
+          if [ "$count" = "0" ]; then exit 0; fi
+          echo "$posts" | jq -c '.[]' | while read -r post; do
+            id=$(echo "$post" | jq -r '.id')
+            path=$(echo "$post" | jq -r '.filePath')
+            mkdir -p "$(dirname "$path")"
+            { echo "$post" | jq -r '.frontmatter'; echo; echo "$post" | jq -r '.body'; } > "$path"
+            img_url=$(echo "$post" | jq -r '.image.url // empty')
+            img_save=$(echo "$post" | jq -r '.image.savePath // empty')
+            if [ -n "$img_url" ] && [ -n "$img_save" ]; then
+              mkdir -p "$(dirname "$img_save")"
+              curl -fsSL -H "Authorization: Bearer $API_KEY" "$img_url" -o "$img_save"
+            fi
+            echo "$id" >> pending-ids.txt
+          done
+
+      - name: Commit & push
+        if: steps.fetch.outputs.count != '0'
+        id: commit
+        run: |
+          set -euo pipefail
+          git config user.name "Blog Automation Bot"
+          git config user.email "blog-automation@users.noreply.github.com"
+          git add .
+          if git diff --cached --quiet; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "Sync blog posts $(date -u +%FT%TZ)"
+          git push
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Confirm delivery
+        if: steps.fetch.outputs.count != '0' && steps.commit.outputs.ok == 'true'
+        env:
+          API_URL: ${{ secrets.BLOG_AUTOMATION_URL }}
+          API_KEY: ${{ secrets.BLOG_AUTOMATION_KEY }}
+        run: |
+          set -euo pipefail
+          while read -r id; do
+            [ -z "$id" ] && continue
+            curl -fsS -X POST -H "Authorization: Bearer $API_KEY" \
+              "$API_URL/api/sites/$SITE/posts/$id/delivered" >/dev/null
+          done < pending-ids.txt
+
+      - name: Report failure
+        if: failure() && steps.fetch.outputs.count != '0'
+        env:
+          API_URL: ${{ secrets.BLOG_AUTOMATION_URL }}
+          API_KEY: ${{ secrets.BLOG_AUTOMATION_KEY }}
+        run: |
+          set -e
+          if [ -f pending-ids.txt ]; then
+            while read -r id; do
+              [ -z "$id" ] && continue
+              curl -fsS -X POST -H "Authorization: Bearer $API_KEY" \
+                -H "Content-Type: application/json" \
+                -d '{"reason":"sync workflow failed"}' \
+                "$API_URL/api/sites/$SITE/posts/$id/failed" >/dev/null || true
+            done < pending-ids.txt
+          fi
