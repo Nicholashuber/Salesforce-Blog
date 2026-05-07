@@ -1,0 +1,198 @@
+---
+title: "Agentforce integration guide: how to connect Agentforce to Apex, Flow,
+  and LWC"
+date: 2026-05-06T15:28:00.000Z
+author: Nick Huber
+category: Developer
+thumbnail: agentforce-integration-guide.png
+tags:
+  - Apex
+  - LWC
+  - Flow
+  - Integration
+  - Agentforce
+  - Named Credentials
+  - Salesforce
+keywords:
+  - Agentforce
+  - Agentforce integration
+  - Agentforce Apex
+  - Agentforce Flow
+  - Agentforce LWC
+  - Salesforce callouts
+  - Named Credentials
+  - Queueable callout
+excerpt: Agentforce integration patterns for Apex, Flow, and LWC with Named
+  Credentials, queueable callouts, and Flow invocable actions — get a working
+  integration pattern you can deploy.
+---
+
+# Agentforce integration guide: how to connect Agentforce to Apex, Flow, and LWC
+
+Short answer: Use a Named Credential plus an auth provider for secure authentication, send batched HTTP requests from a Queueable Apex job for callouts, and expose an @InvocableMethod for Flow and a Apex @AuraEnabled method for LWC. This pattern keeps you within governor limits and supports retries and logging for Agentforce interactions.
+
+## What is Agentforce and when should you integrate with it?
+
+Agentforce is a Salesforce product for conversational and agent assistance workflows that pairs with Einstein AI features. You integrate when you need programmatic control over conversations, to push or pull context, or to call Agentforce actions from Salesforce automations.
+
+Integrate Agentforce when you must: enrich a case with conversation context, surface recommendations in a Lightning page, or run automated routing from Apex or Flow.
+
+## How do you set up authentication and Named Credentials for Agentforce callouts?
+
+Setup steps (OAuth-backed Named Credential):
+
+1. Configure the auth provider.
+   - Setup → Auth. Providers → New. Choose OAuth 2.0 and set the callback URL to https://login.salesforce.com/services/authcallback/YourProviderName.
+2. Create the Named Credential.
+   - Setup → Named Credentials → New.
+   - URL: the Agentforce API base (example: https://api.agentforce.salesforce.com/).
+   - Identity Type: Named Principal.
+   - Authentication Protocol: OAuth 2.0.
+   - Authentication Provider: select the Auth. Provider you created.
+   - Scope: request the API scopes Agentforce requires.
+3. Test the Named Credential by calling it from anonymous Apex or via Workbench.
+
+Use Named Credentials so your code calls a stable name (callout:Agentforce_NC) and Salesforce manages token refresh.
+
+## How do you call Agentforce from Apex without hitting governor limits?
+
+Use a queueable batch approach: collect records in a trigger or bulk process and enqueue a single Queueable job that performs the HTTP callouts in bulk. That avoids callouts inside triggers and spreads network I/O outside the DML transaction.
+
+Apex Queueable pattern (bulk-safe):
+
+```apex
+public with sharing class AgentforceCalloutQueueable implements Queueable, Database.AllowsCallouts {
+    private List<Id> caseIds;
+    public AgentforceCalloutQueueable(List<Id> caseIds) {
+        this.caseIds = caseIds;
+    }
+    public void execute(QueueableContext ctx) {
+        // Bulk query outside loops
+        List<Case> cases = [SELECT Id, Subject, Description FROM Case WHERE Id IN :caseIds];
+
+        // Build bulk payload
+        List<Map<String, Object>> payload = new List<Map<String, Object>>();
+        for (Case c : cases) {
+            payload.add(new Map<String, Object>{'caseId' => c.Id, 'subject' => c.Subject, 'body' => c.Description});
+        }
+
+        HttpRequest req = new HttpRequest();
+        req.setEndpoint('callout:Agentforce_NC/v1/conversations/batch');
+        req.setMethod('POST');
+        req.setHeader('Content-Type', 'application/json');
+        req.setBody(JSON.serialize(payload));
+
+        Http http = new Http();
+        HttpResponse res = http.send(req);
+
+        if (res.getStatusCode() >= 200 && res.getStatusCode() < 300) {
+            // parse response and write lightweight results (avoid heavy DML)
+            // Example: log statuses to a custom object or Platform Event
+        } else {
+            // Use Platform Events or custom error object for retry/alert
+        }
+    }
+}
+```
+
+Trigger that enqueues the job (bulk-safe):
+
+```apex
+trigger CaseAfterInsert on Case (after insert) {
+    List<Id> ids = new List<Id>();
+    for (Case c : Trigger.new) ids.add(c.Id);
+    System.enqueueJob(new AgentforceCalloutQueueable(ids));
+}
+```
+
+## How do you call Agentforce from Flow or LWC?
+
+Flow: create an Apex invocable that enqueues the same Queueable class or performs a single HTTP callout. Then call that from your Flow using an Action element.
+
+Flow element example: Get Records → Action (Apex: AgentforceInvocable.send) → Decision → Update Records. This keeps the flow user-facing steps fast while the actual network call runs asynchronously.
+
+Invocable Apex example (for Flow):
+
+```apex
+public with sharing class AgentforceInvocable {
+    public class Request { @InvocableVariable public Id recordId; }
+
+    @InvocableMethod(label='Send to Agentforce')
+    public static void send(List<Request> requests) {
+        List<Id> ids = new List<Id>();
+        for (Request r : requests) ids.add(r.recordId);
+        System.enqueueJob(new AgentforceCalloutQueueable(ids));
+    }
+}
+```
+
+LWC: call an @AuraEnabled Apex method that enqueues the queueable job. Keep LWC logic limited to UI state; avoid parsing large responses in the client.
+
+Example LWC controller call (JS):
+
+```javascript
+// Apex import
+import sendToAgentforce from '@salesforce/apex/AgentforceInvocable.send';
+
+// call
+sendToAgentforce({ requests: [{ recordId: this.recordId }] })
+  .then(() => { /* success toast */ })
+  .catch(error => { /* show error */ });
+```
+
+## What are the common integration patterns and limits when integrating Agentforce?
+
+Patterns:
+
+- Synchronous API call: use for UI-driven context (small payloads). Use Named Credentials. Keep total callout time under 120 seconds.
+- Asynchronous Queueable: preferred for bulk updates, long-running calls, or retryable logic.
+- Platform Events: use for reliable, decoupled processing and to replay failed messages.
+
+Limits and considerations:
+
+- Callouts per transaction: 100 (governor limit). Use Queueable to avoid hitting this inside DML transactions.
+- Queueable jobs per transaction: 50. Chain carefully.
+- HTTP request timeout: default 10 seconds; set higher if the Agentforce endpoint needs it, but keep UX expectations in mind.
+
+Compare options:
+
+| Pattern | Use when | Governor concerns |
+|---|---:|---|
+| Synchronous callout | small UI fetch, immediate response | counts against request timeouts, 100 callouts/txn |
+| Queueable callout | bulk sends, retries, logs | 50 jobs/txn, allows callouts outside trigger flow |
+| Platform Event | high reliability, retries | separate transaction, replayable |
+
+## Common mistakes integrating Agentforce (and how to fix them)
+
+- **Doing callouts inside triggers.** Then move callouts to a Queueable or Platform Event to avoid blocking DML and to keep transactions short.
+- **Not using Named Credentials.** Then you must manage tokens and secrets manually. Use Setup → Named Credentials → New and the Auth. Provider flow.
+- **Serializing large SObjects into a single request.** Then batch payloads (e.g., 50 records per request) to avoid timeouts and large responses.
+- **Ignoring error details from Agentforce.** Then capture error payloads to a custom object or Platform Event so support can retry with context.
+- **Hardcoding endpoints or credentials in Apex.** Then move them to Named Credentials and Custom Metadata for environment differences.
+
+## FAQ
+
+### What permissions do I need to create a Named Credential for Agentforce?
+
+You need System Administrator or a profile/permission set with Manage Named Credentials and Manage Auth. Providers. Create them at Setup → Named Credentials and Setup → Auth. Providers.
+
+### Can I call Agentforce from a record-triggered Flow?
+
+Yes. Use an Apex @InvocableMethod that enqueues a Queueable job, then call that Apex action from your record-triggered flow (Get Records → Action → Update Records).
+
+### How do I retry failed Agentforce calls?
+
+Capture failures to a custom object or Platform Event and process them with a scheduled job or a replayable subscriber. Avoid tight retry loops inside the same transaction.
+
+### Do I need a separate sandbox config for Agentforce endpoints?
+
+Yes. Use Named Credentials and Custom Metadata to store environment-specific endpoints and switches. Update the Named Credential per sandbox or production environment.
+
+### Where can I find API docs for Agentforce?
+
+Check the Salesforce Developer Docs and your org's Agentforce documentation via Setup and the product's developer guide: https://developer.salesforce.com/docs.
+
+
+Linking notes: if you need background on building reports against Agentforce logs, see the Salesforce reports and dashboards guide here: [/the-ultimate-guide-to-salesforce-reports-and-dashboards-for-admins/]. For trigger best practices used here, review Salesforce trigger context variables explained: [/salesforce-trigger-context-variables-explained/].
+
+Run the Queueable in a sandbox and validate results in debug logs and a small batch of records before scaling to production.
