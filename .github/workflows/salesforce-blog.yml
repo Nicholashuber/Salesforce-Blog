@@ -29,8 +29,20 @@ jobs:
           API_KEY: ${{ secrets.BLOG_AUTOMATION_KEY }}
         run: |
           set -euo pipefail
-          posts=$(curl -fsS -H "Authorization: Bearer $API_KEY" "$API_URL/api/sites/$SITE/posts/pending")
+          body=$(mktemp)
+          code=$(curl -sS -o "$body" -w "%{http_code}" \
+            -H "Authorization: Bearer $API_KEY" \
+            "$API_URL/api/sites/$SITE/posts/pending")
+          if [ "$code" != "200" ]; then
+            echo "::error::Pending fetch returned HTTP $code for site '$SITE'"
+            echo "Response body:"
+            cat "$body"
+            echo
+            exit 1
+          fi
+          posts=$(cat "$body")
           count=$(echo "$posts" | jq 'length')
+          echo "Fetched $count pending post(s) for $SITE"
           echo "count=$count" >> "$GITHUB_OUTPUT"
           : > pending-ids.txt
           if [ "$count" = "0" ]; then exit 0; fi
