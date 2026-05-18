@@ -1,0 +1,257 @@
+---
+title: "LWC S3 presigned upload: Secure direct-to-S3 file uploads with Apex,
+  Named Credentials, and presigned URLs"
+date: 2026-05-18T09:00:00.000Z
+thumbnail: lwc-s3-presigned-upload.png
+tags:
+  - Apex
+  - LWC
+  - Integrations
+  - Security
+  - S3
+  - Named Credentials
+keywords:
+  - LWC S3 presigned upload
+  - presigned S3 URL Salesforce
+  - Apex presign S3
+  - Named Credential S3
+  - direct browser upload S3 LWC
+excerpt: LWC S3 presigned upload shows you how to generate presigned S3 URLs
+  from a secure Apex endpoint (using a Named Credential), upload large files
+  directly from the browser to S3, and record metadata back in Salesforce —
+  avoiding Salesforce file storage and governor issues. Includes copy-paste LWC,
+  Apex, Named Credential steps, a minimal Node presigner, FLS/sharing notes, and
+  security gotchas.
+---
+
+# LWC S3 presigned upload: Secure direct-to-S3 browser uploads with Apex and Named Credentials
+
+Short answer: Use an Apex @AuraEnabled endpoint to request a presigned S3 URL from a secure presigner service (called via a Named Credential), upload the file directly from the LWC using fetch/PUT or a form POST, and then write minimal metadata back to Salesforce. This avoids large file DML in Apex and Salesforce storage while keeping AWS credentials off the client.
+
+## How does the pattern work end-to-end?
+
+1. LWC sends file metadata (filename, contentType, size, parentId) to Apex.
+2. Apex makes a callout to your presigner service via a Named Credential. The presigner returns a presigned PUT URL (or POST fields for form uploads).
+3. LWC uploads the file directly to S3 using the presigned URL — the file bytes never flow through Salesforce.
+4. LWC calls Apex again to record a small metadata record in Salesforce (S3 key, bucket, size, parent record).
+
+This pattern keeps large payloads out of Apex and avoids hitting storage and heap limits while enforcing server-side validation.
+
+## How to configure the Named Credential for your presigner service
+
+Setup steps (example assumes your presigner lives at https://presigner.example.com):
+
+1. Setup → Named Credentials → New Named Credential
+2. Label: S3 Presigner, Name: S3_Presigner
+3. URL: https://presigner.example.com
+4. Identity Type: Named Principal
+5. Authentication Protocol: Password Authentication (or OAuth if your gateway supports it)
+6. Username: api_key (or blank if you use no auth)
+7. Password: <your-api-key>
+8. Generate Authorization Header: checked (if using basic auth)
+9. Save
+
+Notes: Prefer using API Gateway + IAM/OAuth in front of your presigner. Store keys only in the Named Credential, not in Apex constants.
+
+## What does the Apex controller look like?
+
+Apex must be bulk-safe, validate inputs, and enforce FLS/CRUD on metadata writes. This example shows two methods: getPresignedUrl (callout through Named Credential) and saveFileMetadata (create small S3_File__c records). Replace S3_File__c with your metadata object.
+
+```apex
+public with sharing class S3PresignController {
+    @AuraEnabled
+    public static Map<String, Object> getPresignedUrl(String s3Key, String contentType, Id parentId) {
+        // Basic validation
+        if (String.isBlank(s3Key) || String.isBlank(contentType)) {
+            throw new AuraHandledException('Missing required parameters');
+        }
+
+        HttpRequest req = new HttpRequest();
+        // Named Credential: S3_Presigner
+        req.setEndpoint('callout:S3_Presigner/presign');
+        req.setMethod('POST');
+        req.setHeader('Content-Type', 'application/json');
+        Map<String, Object> body = new Map<String, Object>{
+            'key' => s3Key,
+            'contentType' => contentType,
+            'parentId' => parentId
+        };
+        req.setBody(JSON.serialize(body));
+
+        Http http = new Http();
+        HttpResponse res = http.send(req);
+        if (res.getStatusCode() != 200) {
+            throw new AuraHandledException('Presigner error: ' + res.getBody());
+        }
+
+        return (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+    }
+
+    @AuraEnabled
+    public static void saveFileMetadata(String metadataJson) {
+        // metadataJson expected: [{name:, s3Key:, contentType:, bucket:, size:, parentId:}, ...]
+        List<Object> incoming = (List<Object>) JSON.deserializeUntyped(metadataJson);
+        List<S3_File__c> toInsert = new List<S3_File__c>();
+        for (Object o : incoming) {
+            Map<String, Object> m = (Map<String, Object>) o;
+            S3_File__c f = new S3_File__c();
+            f.Name = (String) m.get('name');
+            f.S3_Key__c = (String) m.get('s3Key');
+            f.ContentType__c = (String) m.get('contentType');
+            f.Bucket__c = (String) m.get('bucket');
+            f.Size__c = (Integer) m.get('size');
+            f.ParentId__c = (String) m.get('parentId');
+            toInsert.add(f);
+        }
+
+        // Enforce FLS/CRUD
+        toInsert = (List<S3_File__c>) Security.stripInaccessible(AccessType.CREATABLE, toInsert);
+        if (!toInsert.isEmpty()) insert toInsert;
+    }
+}
+```
+
+Notes: keep callout responses compact (URL and any POST fields). Avoid returning AWS secrets.
+
+## What does the LWC look like (upload flow)?
+
+HTML and JavaScript (imperative Apex calls). This is minimal and handles a single-file upload.
+
+```html
+<!-- fileUploader.html -->
+<template>
+  <input type="file" onchange={handleFileChange} />
+  <button onclick={handleUpload} disabled={isUploading}>Upload</button>
+  <template if:true={message}>{message}</template>
+</template>
+```
+
+```javascript
+// fileUploader.js
+import { LightningElement, api, track } from 'lwc';
+import getPresignedUrl from '@salesforce/apex/S3PresignController.getPresignedUrl';
+import saveFileMetadata from '@salesforce/apex/S3PresignController.saveFileMetadata';
+
+export default class FileUploader extends LightningElement {
+  file;
+  @api parentId;
+  @track isUploading = false;
+  @track message;
+
+  handleFileChange(e) {
+    this.file = e.target.files[0];
+  }
+
+  async handleUpload() {
+    if (!this.file) return;
+    this.isUploading = true;
+    try {
+      const s3Key = `uploads/${Date.now()}_${this.file.name}`;
+      const presign = await getPresignedUrl({ s3Key, contentType: this.file.type, parentId: this.parentId });
+
+      // presign expected: { url: 'https://s3...', bucket: 'my-bucket' }
+      const uploadUrl = presign.url;
+
+      const res = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': this.file.type },
+        body: this.file
+      });
+      if (!res.ok) throw new Error('Upload failed: ' + res.status);
+
+      // Save metadata
+      const meta = [{
+        name: this.file.name,
+        s3Key: s3Key,
+        contentType: this.file.type,
+        bucket: presign.bucket,
+        size: this.file.size,
+        parentId: this.parentId
+      }];
+      await saveFileMetadata({ metadataJson: JSON.stringify(meta) });
+      this.message = 'Upload complete';
+    } catch (err) {
+      this.message = 'Error: ' + err.message;
+    } finally {
+      this.isUploading = false;
+    }
+  }
+}
+```
+
+## Minimal Node presigner you can run locally
+
+This example uses the AWS SDK v3 to create a presigned PUT URL. Host it behind HTTPS and require authentication (basic auth shown here).
+
+```javascript
+// presigner.js (Node + Express)
+const express = require('express');
+const bodyParser = require('body-parser');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const app = express();
+app.use(bodyParser.json());
+
+const s3 = new S3Client({ region: 'us-east-1' });
+
+app.post('/presign', async (req, res) => {
+  // Basic auth check example (replace with API Gateway/Auth)
+  const auth = req.headers.authorization || '';
+  if (auth !== 'Basic ' + Buffer.from('api_key:your_secret').toString('base64')) {
+    return res.status(401).send('Unauthorized');
+  }
+
+  const { key, contentType } = req.body;
+  if (!key || !contentType) return res.status(400).send('Missing params');
+
+  const cmd = new PutObjectCommand({ Bucket: 'your-bucket', Key: key, ContentType: contentType, ACL: 'private' });
+  const url = await getSignedUrl(s3, cmd, { expiresIn: 300 }); // 5 minutes
+  res.json({ url, bucket: 'your-bucket' });
+});
+
+app.listen(3000, () => console.log('presigner running on http://localhost:3000'));
+```
+
+## FLS, sharing, and security notes
+
+- Use Security.stripInaccessible(AccessType.CREATABLE) before DML to enforce field-level protections.
+- Use "with sharing" on controllers that write records so Salesforce sharing rules apply. For presign callouts, use least-privileged identity in the Named Credential.
+- Never store AWS access keys in Apex or LWC. Keep them on the presigner (server-side) and protect the presigner with API Gateway, OAuth, or mTLS.
+- Restrict presigned URLs: validate the requested S3 key prefix, content-type, and size server-side. Short expiration (5–15 minutes) reduces risk.
+- Add CORS to allow uploads from your Experience Cloud domain or site domain. S3 CORS must allow PUT/POST and required headers.
+
+## What performance and governor limits are relevant?
+
+- Apex callouts per transaction: 100. Keep presign calls small and infrequent.
+- You avoid large Apex heap and DML limits because file bytes do not traverse Salesforce.
+- Two Apex transactions (get presign, save metadata) are typical; batch metadata writes when possible.
+
+For background on Apex transactions and limits, see Understanding Apex Transactions and Governor Limits in Salesforce.
+For a comparable LWC + Node integration pattern, see Simplified Payments: Salesforce Integration with Stripe using Lightning Web Components and Node.js.
+
+## Common mistakes (and how to fix them)
+
+- **Putting AWS keys in LWC or Apex** — Fix: keep keys on the presigner and secure that service behind API Gateway/Named Credential.
+- **Not validating the S3 key or content-type server-side** — Fix: enforce allowed prefixes and MIME types in your presigner before signing.
+- **Using overly long presigned URL expiry** — Fix: use 5–15 minutes for browser uploads; shorter is safer.
+- **Uploading the file through Apex** — Fix: use direct browser upload to S3 (PUT/POST) to avoid heap and file storage usage.
+- **Not enforcing FLS/CRUD** — Fix: use Security.stripInaccessible and with sharing on writing controllers.
+
+## FAQ
+
+### Can I generate presigned URLs directly from Apex without an external presigner?
+Not practically. AWS signing (SigV4) from Apex requires you to keep secrets in Apex and implement the signing process. Use a small presigner (Lambda/Node) and call it via a Named Credential instead.
+
+### Should I use PUT presigned URLs or POST (form) presigned uploads?
+PUT is simpler for single files; POST (presigned form) supports more controlled policy fields (size limits, content-type constraints) which can be safer for browsers. Choose POST if you need fine-grained policy constraints.
+
+### How long should presigned URLs last?
+Short — 5–15 minutes for browser uploads. For mobile or slow networks you can extend slightly, but shorter is more secure.
+
+### Do uploads to S3 count against Salesforce file storage?
+No. Only the small metadata records you store in Salesforce count. The file bytes in S3 do not use Salesforce storage.
+
+### How do I handle very large files (>5 GB)?
+Use S3 multipart upload. Your presigner should return presigned URLs for each part; client uploads parts directly and then the presigner completes the multipart upload server-side.
+
+Write the first presigner call and a small metadata record this week; test file uploads from your sandbox domain and validate CORS and content-type matching with S3. 
