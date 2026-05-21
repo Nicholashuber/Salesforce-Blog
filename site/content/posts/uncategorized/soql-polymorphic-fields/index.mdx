@@ -1,0 +1,171 @@
+---
+title: "SOQL polymorphic fields: Querying WhoId, WhatId and other polymorphic
+  relationships"
+date: 2026-05-21T09:00:00.000Z
+thumbnail: soql-polymorphic-fields.png
+tags:
+  - SOQL
+  - Apex
+  - Reporting
+  - Integrations
+  - Best Practices
+keywords:
+  - SOQL polymorphic fields
+  - WhoId WhatId SOQL
+  - TYPEOF SOQL examples
+  - Apex polymorphic helper
+  - querying polymorphic relationships
+excerpt: "SOQL polymorphic fields present real limits: you can’t traverse a
+  polymorphic relationship with dot notation and reports don’t natively expand
+  WhoId/WhatId. This post shows TYPEOF examples, practical
+  relationship-traversal workarounds, a bulk-safe Apex utility to materialize
+  polymorphic targets for reporting, and when to use SOSL or an external join
+  table."
+---
+
+# SOQL polymorphic fields: Querying WhoId, WhatId and other polymorphic relationships
+
+Short answer: SOQL polymorphic fields (like WhoId and WhatId) cannot be traversed with dot notation because the target object can vary. Use TYPEOF in SOQL where supported, split Ids by SObject type in Apex and run per-type queries, or denormalize the data into concrete fields for reporting. Below are runnable SOQL samples, a bulk-safe Apex utility to materialize polymorphic targets, and guidance on when SOSL or an external join table is the right call.
+
+## What are SOQL polymorphic fields and why do they matter?
+Polymorphic fields are lookup-like fields whose target object can change per record (e.g., Task.WhoId can be a Contact, Lead, or User). They matter because common patterns—relationship traversal (Account.Name) and report types—expect a known object. Polymorphism breaks those assumptions, forcing you to either branch at query time or store resolved values for reporting.
+
+## How can I use TYPEOF to read polymorphic fields in SOQL?
+TYPEOF expands polymorphic fields within a single SOQL query and returns typed subfields. Not supported everywhere (not in standard report builder) and has some API limitations—see Salesforce docs for details.
+
+Example: Tasks created in the last 7 days, returning Who/What name depending on the target type.
+
+```sql
+SELECT Id, Subject, WhoId,
+  TYPEOF Who
+    WHEN Contact THEN FirstName, LastName
+    WHEN Lead THEN Name, Company
+    WHEN User THEN Name
+  END,
+  WhatId,
+  TYPEOF What
+    WHEN Account THEN Name, Industry
+    WHEN Opportunity THEN Name, Amount, CloseDate
+  END
+FROM Task
+WHERE CreatedDate = LAST_N_DAYS:7
+LIMIT 200
+```
+
+Notes: TYPEOF columns are aliased to the inner field names (FirstName, Name, etc.). Use LIMIT during exploration. TYPEOF is available in API and Apex SOQL contexts but is not supported in Salesforce reports and some tooling—check the Developer Docs for your API version.
+
+Reference: https://developer.salesforce.com/docs
+
+## How do I query polymorphic targets in Apex when TYPEOF isn’t usable?
+Use Id.getSObjectType() to group Ids by object type, then run one query per type. This is the most common pattern for triggers, batch jobs, and integrations.
+
+A bulk-safe Apex utility you can drop into your org (copy-paste). It accepts a set of Ids to resolve and a list of fields to retrieve per target object.
+
+```apex
+public with sharing class PolymorphicResolver {
+    /**
+     * Returns a map from Id -> SObject for the supplied Ids.
+     * fieldsToQuery should be object field names valid across the target object (e.g. new List<String>{'Name','Industry'})
+     */
+    public static Map<Id, SObject> materialize(Set<Id> idsToResolve, List<String> fieldsToQuery) {
+        Map<Id, SObject> result = new Map<Id, SObject>();
+        if (idsToResolve == null || idsToResolve.isEmpty()) return result;
+
+        // Group Ids by sObjectType
+        Map<String, List<Id>> idsByType = new Map<String, List<Id>>();
+        for (Id recId : idsToResolve) {
+            try {
+                String typeName = recId.getSObjectType().getDescribe().getName();
+                if (!idsByType.containsKey(typeName)) idsByType.put(typeName, new List<Id>());
+                idsByType.get(typeName).add(recId);
+            } catch (Exception ex) {
+                // Skip malformed Ids
+            }
+        }
+
+        // Query each type once
+        for (String typeName : idsByType.keySet()) {
+            List<Id> ids = idsByType.get(typeName);
+            // Build field list, always include Id
+            List<String> allFields = new List<String>{'Id'};
+            if (fieldsToQuery != null) allFields.addAll(fieldsToQuery);
+            String soql = 'SELECT ' + String.join(allFields, ',') + ' FROM ' + typeName + ' WHERE Id IN :ids';
+            try {
+                // Database.query returns List<SObject>
+                for (SObject s : Database.query(soql)) {
+                    result.put((Id)s.get('Id'), s);
+                }
+            } catch (Exception e) {
+                // If a type is not queryable (platform event, big object), skip it
+                // Optionally log the error to a custom object or debug log
+                System.debug('PolymorphicResolver: skipped ' + typeName + ' - ' + e.getMessage());
+            }
+        }
+        return result;
+    }
+}
+```
+
+Usage example inside a trigger that needs Who.Name for a list of Tasks:
+
+```apex
+Set<Id> whoIds = new Set<Id>();
+for (Task t : Trigger.new) if (t.WhoId != null) whoIds.add(t.WhoId);
+Map<Id,SObject> targets = PolymorphicResolver.materialize(whoIds, new List<String>{'Name','FirstName','LastName'});
+for (Task t : Trigger.new) {
+  SObject target = targets.get(t.WhoId);
+  if (target != null) {
+    String whoName = (String)target.get('Name');
+    // fallback to FirstName+LastName when Name is null (Contact)
+  }
+}
+```
+
+Governor notes: each type yields one query. Keep the number of distinct target types small (typical Who/What targets are <10). You still must respect the 100 SOQL queries per transaction and 50,000-row limits.
+
+## When should I denormalize polymorphic data for reporting or integrations?
+If you need polymorphic fields in standard reports or dashboards, denormalize: copy target name/type into concrete text fields (Task.ResolvedWhoName__c, Task.ResolvedWhoType__c) via before-save Flow or before-insert/update Apex. Before-save Flows are preferred for simple denormalization because they avoid DML and are fast.
+
+If you need a single cross-object search (searching names across many target objects) and you want joins in SQL-style, extract the relationships into a custom join table using ETL or a scheduled Apex job and build reports off that table. This matches large-scale BI patterns covered in our posts about data management and external integration.
+
+See: The Ultimate Guide to Salesforce Reports and Dashboards for Admins for reporting trade-offs.
+
+## When is SOSL or an external join table the right choice?
+Use SOSL when you must search text across many objects quickly (full-text search). Use an external join table or a data warehouse when you need SQL-style joins or historical snapshots across many object types, or when reporting tools can’t consume TYPEOF results.
+
+## Best practices and performance considerations
+- Query only the fields you need. Dynamic queries that select many fields increase heap and CPU.
+- Batch at scale. For batch jobs, resolve polymorphic targets per batch chunk and reuse the resolver.
+- Cache per-transaction: if you resolve the same Id multiple times, cache the result in a static map.
+- Prefer before-save Flows to populate denormalized text fields when the logic is simple and you need reporting compatibility.
+- Watch for inaccessible objects: some platform objects or managed-package objects may throw exceptions when queried—handle exceptions and log them.
+
+## Common mistakes (and how to fix them)
+- **Trying to traverse polymorphic fields with dot notation.** Fix: use TYPEOF or resolve the Id to a concrete SObject in Apex.
+- **Expecting TYPEOF to work in reports.** Fix: denormalize the value into a text field via Flow or Apex and report on that field.
+- **Running one SOQL per Id inside a loop.** Fix: group Ids by sObject type and run one SOQL per type (see PolymorphicResolver).
+- **Assuming Id prefixes are stable for all orgs.** Fix: use Id.getSObjectType() instead of string prefix parsing.
+- **Not handling query failures for managed or non-queryable types.** Fix: wrap Database.query in try/catch and fall back or log.
+
+## FAQ
+
+### Can I use TYPEOF in Apex code?
+Yes. TYPEOF can be used in Apex SOQL in many contexts, but check the Developer Docs for API/version limitations and tool-specific support. It's not usable in standard report builder.
+
+### How do I get the sObject name from an Id in Apex?
+Use id.getSObjectType().getDescribe().getName(). This is deterministic and supported across orgs.
+
+### Is SOSL a replacement for TYPEOF?
+No. SOSL searches text across objects and returns records that match text criteria; TYPEOF returns typed fields from a polymorphic relationship. Use SOSL for search, TYPEOF for structured polymorphic projection.
+
+### Can I make reports show Who.Name for Tasks and Events?
+Not directly. Create a denormalized text field (populated by before-save Flow or Apex on create/update) that stores Who.Name and Who.Type, and include that field in reports. Our Reports guide covers reporting trade-offs and denormalization patterns.
+
+### What about performance limits for large batches?
+Group by type and use batching (Batch Apex) so each execute() processes a limited set of Ids. Watch SOQL row and query limits per transaction; reuse resolver results where possible.
+
+If you need to read more about SOQL joins and relationship traversal as a companion to this pattern, see our Ultimate Guide to SOQL Joins.
+
+Use this pattern when you have real business logic that must materialize polymorphic targets for automation, reporting, or integrations. For quick searches use SOSL; for long-running analytics push data to a warehouse or external join table and report there.
+
+
