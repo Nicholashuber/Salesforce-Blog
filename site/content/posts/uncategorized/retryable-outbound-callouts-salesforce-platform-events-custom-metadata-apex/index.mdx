@@ -1,0 +1,266 @@
+---
+title: Retryable outbound callouts Salesforce — Durable pattern with Platform
+  Events, Custom Metadata, and Apex
+date: 2026-05-25T09:00:00.000Z
+thumbnail: retryable-outbound-callouts-salesforce-platform-events-custom-metadata-apex.png
+tags:
+  - Apex
+  - Integrations
+  - Platform Events
+  - Custom Metadata
+  - Retry
+  - Architecture
+keywords:
+  - retryable outbound callouts Salesforce
+  - platform events retry pattern
+  - Salesforce callout retry
+  - Apex retry backoff
+  - custom metadata retry policy
+excerpt: Implement a durable, at-least-once retry system for flaky third‑party
+  APIs by enqueuing requests as Platform Events, persisting them for scheduling,
+  and processing with Apex that reads retry policies from Custom Metadata.
+  Includes Platform Event schema, Custom Metadata examples, Apex trigger +
+  batch/queueable processor, exponential backoff, dead‑letter handling, and a
+  test plan.
+---
+
+Short answer
+
+Publish outgoing requests as a Platform Event for durable ingress, persist each event into an Outbound_Request__c record, and use a Scheduled Apex job that enqueues a Database.Batchable or Queueable worker (Database.AllowsCallouts) to perform HTTP callouts. Store retry policy and rate limits in Custom Metadata, compute exponential backoff in Apex, and move permanently failing requests to a dead‑letter object or event.
+
+How to implement retryable outbound callouts in Salesforce
+
+This pattern has three durable pieces: a Platform Event (ingress), a persistent queue (custom object) for scheduling and state, and an Apex processing pipeline that reads retry rules from Custom Metadata and performs the callouts with exponential backoff and dead‑letter handling.
+
+High level steps
+
+1. Create a Platform Event that external systems and internal code publish (Setup → Platform Events → New Platform Event).
+2. Trigger on the Platform Event to insert an Outbound_Request__c record (durable, queryable).
+3. Create a Scheduled Apex job that queries Outbound_Request__c where Next_Attempt_At__c <= NOW and enqueues a Batchable worker.
+4. In the Batchable/Queueable worker, perform callouts with Database.AllowsCallouts and apply retry logic from Custom Metadata.
+5. On success, mark the request Completed; on retryable failure, update attempt count and Next_Attempt_At__c using exponential backoff; on terminal failure, move to Dead_Letter__c and/or publish a Dead_Letter_Event__e.
+
+What Platform Event schema should I use?
+
+Use a compact event payload with a reference to the persistent record. Example Platform Event fields:
+
+```json
+// Platform Event: Outbound_Request_Event__e
+{
+  "Name": "Outbound_Request_Event__e",
+  "fields": [
+    { "fullName": "CorrelationId__c", "type": "Text", "length": 50 },
+    { "fullName": "Payload__c", "type": "LongTextArea", "length": 32768 },
+    { "fullName": "NamedCredential__c", "type": "Text", "length": 255 },
+    { "fullName": "RecordType__c", "type": "Text", "length": 50 }
+  ]
+}
+```
+
+Trigger the event from external systems or publish from Apex:
+
+```apex
+// publish via Apex
+Outbound_Request_Event__e evt = new Outbound_Request_Event__e(
+  CorrelationId__c = 'ORD-12345',
+  Payload__c = '{"orderId":12345}',
+  NamedCredential__c = 'ThirdParty_NC'
+);
+Database.SaveResult sr = EventBus.publish(evt);
+```
+
+How to design Custom Metadata for retry policies
+
+Create a Custom Metadata Type: Outbound_Callout_Policy__mdt with fields:
+
+- Name (API name used as key)
+- Max_Attempts__c (Number)
+- Base_Delay_Seconds__c (Number)
+- Max_Delay_Seconds__c (Number)
+- Retry_Status_Codes__c (Text, CSV like "429,500,502,503")
+- Max_Requests_Per_Minute__c (Number)
+
+Example record (pseudo-JSON):
+
+```json
+// Outbound_Callout_Policy__mdt
+{
+  "DeveloperName": "DefaultPolicy",
+  "MasterLabel": "DefaultPolicy",
+  "Max_Attempts__c": 5,
+  "Base_Delay_Seconds__c": 30,
+  "Max_Delay_Seconds__c": 3600,
+  "Retry_Status_Codes__c": "429,500,502,503",
+  "Max_Requests_Per_Minute__c": 60
+}
+```
+
+Refer to Custom Metadata in Apex via SOQL on the mdt type (no callouts, safe to cache).
+
+How to write a resilient Apex subscriber and processor
+
+1) Platform Event trigger: transform events into durable Outbound_Request__c records.
+
+```apex
+trigger OutboundRequestPE on Outbound_Request_Event__e (after insert) {
+  List<Outbound_Request__c> toInsert = new List<Outbound_Request__c>();
+  for (Outbound_Request_Event__e e : Trigger.New) {
+    toInsert.add(new Outbound_Request__c(
+      Correlation_Id__c = e.CorrelationId__c,
+      Payload__c = e.Payload__c,
+      Named_Credential__c = e.NamedCredential__c,
+      Status__c = 'Queued',
+      Attempt_Count__c = 0,
+      Next_Attempt_At__c = System.now()
+    ));
+  }
+  if (!toInsert.isEmpty()) insert toInsert;
+}
+```
+
+2) Scheduled job that enqueues a batch:
+
+```apex
+global class OutboundRequestScheduler implements Schedulable {
+  global void execute(SchedulableContext ctx) {
+    ID jobId = System.scheduleBatch(new OutboundCalloutBatch(), 'OutboundCalloutBatch', 5);
+  }
+}
+```
+
+3) Batchable with callouts and retry logic (bulkified, Database.AllowsCallouts):
+
+```apex
+public with sharing class OutboundCalloutBatch implements Database.Batchable<sObject>, Database.AllowsCallouts {
+  public Database.QueryLocator start(Database.BatchableContext bc) {
+    return Database.getQueryLocator([
+      SELECT Id, Payload__c, Attempt_Count__c, Named_Credential__c
+      FROM Outbound_Request__c
+      WHERE Status__c = 'Queued' AND Next_Attempt_At__c <= :System.now()
+      ORDER BY CreatedDate
+    ]);
+  }
+
+  public void execute(Database.BatchableContext bc, List<Outbound_Request__c> scope) {
+    // Load policy once
+    Map<String, Outbound_Callout_Policy__mdt> policies = OutboundCalloutUtils.getPolicyMap();
+    OutboundCalloutUtils.processScope(scope, policies);
+  }
+
+  public void finish(Database.BatchableContext bc) {}
+}
+```
+
+Utility class handles HTTP callout, status-code classification, exponential backoff and updates in bulk. Key snippets:
+
+```apex
+public class OutboundCalloutUtils {
+  public static Map<String, Outbound_Callout_Policy__mdt> getPolicyMap() {
+    Map<String, Outbound_Callout_Policy__mdt> m = new Map<String, Outbound_Callout_Policy__mdt>();
+    for (Outbound_Callout_Policy__mdt p : [SELECT DeveloperName, Max_Attempts__c, Base_Delay_Seconds__c, Max_Delay_Seconds__c, Retry_Status_Codes__c FROM Outbound_Callout_Policy__mdt])
+      m.put(p.DeveloperName, p);
+    return m;
+  }
+
+  public static void processScope(List<Outbound_Request__c> scope, Map<String, Outbound_Callout_Policy__mdt> policies) {
+    List<Outbound_Request__c> updates = new List<Outbound_Request__c>();
+    for (Outbound_Request__c req : scope) {
+      try {
+        HttpRequest r = new HttpRequest();
+        r.setEndpoint('callout:'+req.Named_Credential__c+'/api');
+        r.setMethod('POST');
+        r.setBody(req.Payload__c);
+        Http h = new Http();
+        HttpResponse res = h.send(r);
+
+        Integer status = res.getStatusCode();
+        if (status >= 200 && status < 300) {
+          req.Status__c = 'Completed';
+        } else if (shouldRetry(status, policies.get('DefaultPolicy').Retry_Status_Codes__c)) {
+          scheduleRetry(req, policies.get('DefaultPolicy'));
+        } else {
+          req.Status__c = 'Failed';
+          // copy to dead letter or publish event
+        }
+      } catch (System.CalloutException ex) {
+        scheduleRetry(req, policies.get('DefaultPolicy'));
+      }
+      updates.add(req);
+    }
+    if (!updates.isEmpty()) update updates;
+  }
+
+  private static Boolean shouldRetry(Integer status, String csv) {
+    Set<String> codes = new Set<String>(csv.split(','));
+    return codes.contains(String.valueOf(status));
+  }
+
+  private static void scheduleRetry(Outbound_Request__c req, Outbound_Callout_Policy__mdt policy) {
+    Integer attempts = (req.Attempt_Count__c == null) ? 0 : Integer.valueOf(req.Attempt_Count__c);
+    attempts++;
+    if (attempts >= Integer.valueOf(policy.Max_Attempts__c)) {
+      req.Status__c = 'DeadLetter';
+      // optionally publish Dead_Letter_Event__e
+    } else {
+      Long delay = Math.min(policy.Base_Delay_Seconds__c * (1 << (attempts-1)), policy.Max_Delay_Seconds__c);
+      req.Attempt_Count__c = attempts;
+      req.Next_Attempt_At__c = System.now().addSeconds((Integer) delay);
+    }
+  }
+}
+```
+
+How to handle dead‑letter and backoff policies
+
+- Use Custom Object Dead_Letter__c for debugging and a Dead_Letter_Event__e platform event for operational alerts.
+- Compute exponential backoff client-side with Base_Delay * 2^(attempts-1) capped by Max_Delay.
+- Respect rate limits with a Custom Metadata Max_Requests_Per_Minute__c; in processScope implement local throttling (sleep not allowed) by limiting batch size and spacing the Scheduled job frequency.
+
+How to test timeouts and partial failures
+
+1) Implement Apex HttpCalloutMock classes (see https://developer.salesforce.com/docs) and write unit tests that:
+   - Return 200 for success cases.
+   - Return 500/502/503 for transient failures and assert Attempt_Count__c increments and Next_Attempt_At__c is set with exponential backoff.
+   - Return 429 with Retry-After header; in the mock include header parsing and assert Next_Attempt_At__c respects Retry-After.
+   - Throw System.CalloutException to simulate timeouts and ensure retries are scheduled.
+
+2) End-to-end test in a sandbox:
+   - Setup → Named Credentials → New and add the external target.
+   - Publish Outbound_Request_Event__e via anonymous Apex and confirm Outbound_Request__c created.
+   - Manually run the Scheduled job (or shorten schedule in sandbox) and observe states change.
+   - Confirm dead‑letter records are created after Max_Attempts.
+
+3) Load test: use a small schedule frequency and publish many events, then monitor CPU, concurrent limits, and failure patterns.
+
+Common mistakes (and how to fix them)
+
+- Publishing full request payload into the Platform Event and never persisting a queryable record: persist to Outbound_Request__c from the PE trigger so you can schedule and query retries reliably.
+- Performing many callouts per transaction without Database.AllowsCallouts or with Batch size > 100: set batchSize <= 100 and implement Database.AllowsCallouts on the batch.
+- Hardcoding retry policy in Apex: use Custom Metadata so policy changes don’t require deployment; cache the mdt in a static map for the transaction.
+- Not handling 429 Retry‑After headers: parse Retry‑After and set Next_Attempt_At__c accordingly instead of using fixed backoff.
+- Skipping dead‑letter records: without dead‑letter visibility you lose failed payloads — always persist failures for post‑mortem.
+
+FAQ
+
+### What are retryable outbound callouts in Salesforce?
+Retryable outbound callouts are HTTP requests sent from Salesforce that will automatically retry on transient failures (5xx, 429, timeouts) according to a configured policy until success or a terminal failure.
+
+### Can Platform Event triggers make callouts directly?
+Platform Event triggers run asynchronously, but you should avoid doing many callouts directly in the trigger; transform the event to an Outbound_Request__c record and process with a Batchable/Queueable annotated with Database.AllowsCallouts.
+
+### How many retries should I allow?
+Use Custom Metadata to tune this per integration; common defaults are 3–5 attempts with exponential backoff, and a dead‑letter after the limit is reached.
+
+### How do I respect third‑party rate limits?
+Store Max_Requests_Per_Minute__c in Custom Metadata and apply local throttling by controlling batchSize and Scheduled job frequency; for strict limits, implement a token bucket coordinator (custom object) used by processors.
+
+### How do I test callout retries in Apex?
+Use HttpCalloutMock implementations and Test.setMock in your unit tests to simulate 200, 5xx, 429 with Retry‑After, and callout exceptions; assert Attempt_Count__c and Next_Attempt_At__c values.
+
+For more on Platform Events and Custom Metadata types see the Salesforce docs: https://developer.salesforce.com/docs and the Platform Events and Custom Metadata documentation pages.
+
+Reference links inside this site: for background on event-driven integrations read Building Scalable Salesforce Integrations with Platform Events and for using Custom Metadata for runtime configuration see Boosting Salesforce Performance with Custom Metadata Types: A Complete Guide.
+
+Schedule the OutboundRequestScheduler in Setup → Apex Classes → Schedule Apex with a short interval in sandbox to iterate on the policy quickly.
+
+
