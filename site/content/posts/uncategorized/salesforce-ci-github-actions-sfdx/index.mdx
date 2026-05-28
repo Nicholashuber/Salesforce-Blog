@@ -1,0 +1,220 @@
+---
+title: "Salesforce CI GitHub Actions sfdx: a ready-to-run PR validation pipeline
+  with Scratch Orgs"
+date: 2026-05-28T09:00:00.000Z
+thumbnail: salesforce-ci-github-actions-sfdx.png
+tags:
+  - DevOps
+  - Apex
+  - LWC
+  - sfdx
+  - GitHub Actions
+  - CI/CD
+keywords:
+  - Salesforce CI GitHub Actions sfdx
+  - salesforce ci
+  - sfdx github actions scratch org
+  - apex test ci
+  - unlocked package ci
+excerpt: "A practical, copy-paste GitHub Actions workflow that uses sfdx and
+  disposable Scratch Orgs to validate pull requests: runs ESLint/Jest for LWC,
+  pushes source to a scratch org, runs Apex tests selectively, enforces metadata
+  format, and produces a validated package version for deployment."
+---
+
+# Salesforce CI GitHub Actions sfdx: a ready-to-run PR validation pipeline with Scratch Orgs
+
+Short answer: copy the workflow below to validate PRs with a disposable Scratch Org. The Actions YAML creates a scratch org from your Dev Hub, pushes source, runs LWC lint/tests, conditionally runs Apex tests (RunLocalTests when Apex changes), loads test data when needed, and then creates a validated unlocked package version or performs a metadata validation deploy.
+
+## What does this pipeline do and why you should use it
+It gives you source-driven CI: every PR is validated against a real Salesforce runtime (a Scratch Org), so merges are gated on lint, unit tests, and an actual push/deploy. That prevents broken metadata, missing LWC module exports, and tests that only fail in org context.
+
+## How to authenticate sfdx in GitHub Actions
+1. Create a Dev Hub (Setup → Dev Hub) and a connected app for JWT. Store these in repo secrets: SF_DEV_HUB_USERNAME, SF_CLIENT_ID, SF_JWT_KEY (base64 of the private key), SF_INSTANCE_URL (optional; default https://login.salesforce.com).
+2. In Actions, write the JWT key to a file and run:
+
+```bash
+sfdx force:auth:jwt:grant -u ${{ secrets.SF_DEV_HUB_USERNAME }} -i ${{ secrets.SF_CLIENT_ID }} -f jwt.key -r ${{ secrets.SF_INSTANCE_URL }}
+```
+
+This gives your CI runner Dev Hub access for scratch org creation and package version creation.
+
+## Full GitHub Actions workflow (copy this into .github/workflows/ci.yml)
+
+```yaml
+name: PR validation
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      SFDX_AUTOUPDATE_DISABLE: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install sfdx CLI
+        run: npm install -g sfdx-cli@latest
+
+      - name: Restore cached node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+
+      - name: Authenticate Dev Hub (JWT)
+        env:
+          SF_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
+          SF_DEV_HUB_USERNAME: ${{ secrets.SF_DEV_HUB_USERNAME }}
+          SF_INSTANCE_URL: ${{ secrets.SF_INSTANCE_URL }}
+        run: |
+          echo "$${{ secrets.SF_JWT_KEY }}" | base64 --decode > jwt.key
+          sfdx force:auth:jwt:grant -u "$SF_DEV_HUB_USERNAME" -i "$SF_CLIENT_ID" -f jwt.key -r "${SF_INSTANCE_URL:-https://login.salesforce.com}"
+
+      - name: Create Scratch Org
+        id: create_scratch
+        run: |
+          ORG_ALIAS=pr-${{ github.event.number }}
+          sfdx force:org:create -f config/project-scratch-def.json -a "$ORG_ALIAS" -s -d 1 -v ${{ secrets.SF_DEV_HUB_USERNAME }}
+          echo "ORG_ALIAS=$ORG_ALIAS" >> $GITHUB_ENV
+
+      - name: Install npm deps & run LWC Jest + ESLint
+        run: |
+          npm ci
+          npm run lint
+          npm test
+
+      - name: Push source to Scratch Org
+        run: |
+          sfdx force:source:push -u "$ORG_ALIAS"
+
+      - name: Load test data when required
+        if: fileExists('data/sample-Accounts.json')
+        run: |
+          sfdx force:data:tree:import -p data/sample-Accounts-plan.json -u "$ORG_ALIAS"
+
+      - name: Run Apex tests when Apex changed (RunLocalTests)
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD | grep -E '\.(cls|trigger)$' || true)
+          if [ -n "$CHANGED" ]; then
+            echo "Apex changed; running RunLocalTests"
+            sfdx force:apex:test:run -u "$ORG_ALIAS" --testlevel RunLocalTests --wait 20 --resultformat human
+          else
+            echo "No Apex changes detected; skipping Apex test run"
+          fi
+
+      - name: Validate as Metadata API (check-only deploy)
+        run: |
+          sfdx force:source:convert -d mdapi_output_dir -r force-app
+          sfdx force:mdapi:deploy -d mdapi_output_dir -u "$ORG_ALIAS" -c -l RunLocalTests --wait 20
+
+      - name: Create validated package version (unlocked) in Dev Hub
+        run: |
+          sfdx force:package:version:create --package "YourPackageAlias" --path force-app --installationkeybypass --wait 30 --targetdevhubusername ${{ secrets.SF_DEV_HUB_USERNAME }} --json > package-version.json
+          jq '.result.Id' package-version.json
+
+      - name: Delete Scratch Org
+        if: always()
+        run: sfdx force:org:delete -u "$ORG_ALIAS" -p || true
+```
+
+Notes: the workflow runs lint and Jest locally, pushes to scratch, runs Apex tests only when Apex changed (RunLocalTests), performs an mdapi check-only deploy, then creates a validated unlocked package version in the Dev Hub.
+
+## Sample sfdx-project.json (unlocked package)
+
+```json
+{
+  "packageDirectories": [
+    {
+      "path": "force-app",
+      "default": true,
+      "package": "YourPackageAlias",
+      "versionName": "v1.0.${env.BUILD_NUMBER}",
+      "versionNumber": "1.0.${env.BUILD_NUMBER}"
+    }
+  ],
+  "namespace": "",
+  "sfdcLoginUrl": "https://login.salesforce.com",
+  "sourceApiVersion": "58.0"
+}
+```
+
+## Sample package.xml (metadata API validation)
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<Package xmlns="http://soap.sforce.com/2006/04/metadata">
+  <types>
+    <members>*</members>
+    <name>ApexClass</name>
+  </types>
+  <types>
+    <members>*</members>
+    <name>LightningComponentBundle</name>
+  </types>
+  <version>58.0</version>
+</Package>
+```
+
+## Handling data-dependent tests
+- Always prefer @isTest(SeeAllData=false) and create test data via factories inside tests.
+- For static seed data use Test.loadData with csv files committed under force-app/test/data and load them after org create using sfdx force:data:tree:import.
+- If integration tests truly require external systems, mark them with @isTest and a custom tag; run them only in a separate pipeline that has those integrations configured.
+
+See the test data pattern guidance in the Salesforce docs: https://developer.salesforce.com/docs
+
+## Roll-forward and rollback guidance for failed releases
+- Validated package created: if package version creation succeeds, record the 04t version ID from the JSON output and use that to install in production with a maintenance window.
+- If a production install fails, immediately install the last successful package version ID via:
+
+```bash
+sfdx force:package:install --package 04txxx --wait 20 --publishwait 10 --targetusername PROD_ALIAS
+```
+
+- If a metadata API deploy fails (check-only succeeded earlier but deploy fails), do not retry blind — inspect the async result, address the failing tests or missing dependencies, and create a new package version. Never run destructive changes without a rollback plan and backup.
+
+## Best practices and performance notes
+- Run RunLocalTests in CI when Apex changes; run single-test classes only in fast developer checks. Running all tests every PR will slow your pipeline but gives maximum safety for orgs with cross-class coverage dependencies.
+- Keep scratch org lifetime short (1 day) and always delete them in the pipeline to avoid hitting Dev Hub scratch limits. Check your Dev Hub limits in Setup or the Developer Docs.
+- Linting and Jest run locally (node) to fail fast before creating orgs.
+- Use unlocked packages for modular, repeatable deployments. If you're not ready for packages, a metadata (mdapi) check-only deploy is a lightweight validation.
+
+## Common mistakes
+- **Running all Apex tests on every PR.** Fix: run RunLocalTests only when Apex changed; reserve full test suites for nightly builds or release pipelines.
+- **Committing test data to production orgs.** Fix: use Test.loadData or test factories and import data in CI scratch orgs only (sfdx force:data:tree:import).
+- **Storing JWT key in plaintext.** Fix: store base64-encoded private key in GitHub Secrets and write it to a file at runtime (see workflow above).
+- **Not deleting scratch orgs.** Fix: always run sfdx force:org:delete -u alias -p in a finally/always step to free Dev Hub quota.
+- **Assuming package:version:create is instant.** Fix: treat package creates as asynchronous; capture the JSON output and poll or wait using --wait.
+
+## FAQ
+
+### How do I run only changed Apex tests in CI?
+You can detect changed .cls/.trigger files via git diff and either run RunLocalTests or build a mapping from changed classes to test classes. Start with RunLocalTests for correctness, then optimize with a test-mapping script.
+
+### How do I authenticate sfdx in GitHub Actions?
+Use JWT OAuth with a connected app in the Dev Hub and store the client ID, username, and base64 private key in repo secrets; run sfdx force:auth:jwt:grant in the workflow.
+
+### Can I use sandboxes instead of scratch orgs in CI?
+Yes, but sandboxes are less lightweight and harder to create/destroy per-PR. Scratch Orgs give true ephemeral validation for source-driven development and are the recommended pattern for CI validation.
+
+### Do I need to run eslint and jest in Actions?
+Yes—run LWC ESLint and @salesforce/sfdx-lwc-jest locally in the CI job before creating orgs to fail fast on obvious JavaScript issues.
+
+### What if package:version:create fails?
+Inspect the JSON output for the blocking errors, fix metadata or dependency issues, and create a new version. For releases, have the last good 04t ID available to roll back installs.
+
+
+Read more on test data and governor limits in these posts: [Understanding Apex Transactions and Governor Limits in Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/understanding-apex-transactions-and-governor-limits-in-salesforce/index.mdx) and [Mastering Salesforce Data Management: A Complete Guide for Admins](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/administrator/mastering-salesforce-data-management-a-complete-guide-for-admins/index.mdx).
+
+One practical next step: copy the workflow into .github/workflows/ci.yml, set the required repo secrets, and run it against a small feature branch that modifies a single LWC and a single Apex class to validate the flow.
+
