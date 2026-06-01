@@ -1,0 +1,173 @@
+---
+title: "How to read and act on the SOQL query plan: a practical guide for
+  high-volume orgs"
+date: 2026-06-01T09:00:00.000Z
+category: Developer
+thumbnail: soql-query-plan-practical-guide-high-volume-orgs.png
+tags:
+  - SOQL
+  - Apex
+  - Performance
+  - Indexes
+  - Developer
+keywords:
+  - SOQL query plan
+  - Query Plan Tool
+  - index_scan
+  - key_scan
+  - SOQL selectivity
+  - optimize SOQL
+  - custom index salesforce
+  - skinny table salesforce
+excerpt: Use the SOQL query plan to see whether Salesforce will use an index or
+  scan your table, then fix non‑selective queries with three rewrite patterns
+  and a few schema changes (External ID index, support-created custom index, or
+  skinny tables). This guide shows exactly how to capture a plan, interpret
+  index_selectivity/key_scan vs index_scan, and copy-paste before/after SOQL.
+---
+
+# How to read and act on the SOQL query plan: a practical guide for high-volume orgs
+
+Short answer: Open the Developer Console Query Editor, run the Query Plan for a problematic SOQL string, and read the Operation and Selectivity/Cardinality columns — those tell you whether the engine will use an index (key_scan/index_scan) or do a full table scan. If the plan shows non-selective access, apply one of three rewrite patterns (remove functions from indexed fields, convert ORs that kill indexes into multiple selective queries, replace leading % LIKE with SOSL or prefix searches) or add an index (External ID/unique, Salesforce support custom index, or request skinny tables).
+
+## How do I capture a SOQL query plan?
+
+1. Setup the query you want to inspect. Reproduce the real WHERE clause and fields.
+2. Open Developer Console → Query Editor. Paste the SOQL.
+3. Click the "Query Plan" button (not "Execute"). The tool returns one or more plan rows for alternate access paths.
+4. Save a screenshot or copy the plan text for change-control and review.
+
+You can also capture plans from an automated test harness using the Tooling API's Query Plan endpoint; for most teams Developer Console is fastest during investigations. See the Salesforce docs for Query Plan Tool usage: https://developer.salesforce.com/docs
+
+## What does each Query Plan column mean and what should I watch first?
+
+- Operation (key_scan / index_scan / full_table_scan): key_scan is a highly-selective inequality/equality lookup on an indexed key (best). index_scan uses an index but will read a range of rows (ok depending on cardinality). full_table_scan means no usable index — fix this first.
+- Cardinality (estimated rows): the engine's expected number of rows matched by the predicate. Large cardinality usually means non-selective.
+- Selectivity / Estimated Cost: relative numbers — lower is better. Use them to compare alternate plans; absolute thresholds vary by org data distribution.
+
+Action order: if you see full_table_scan, identify which predicate prevents index usage. If you see index_scan with high cardinality, tighten predicates or change the index.
+
+## How do I tell whether a specific filter is indexable?
+
+- Indexed candidates: Id, foreign keys (AccountId, OwnerId), CreatedDate (system index sometimes used for range), fields marked External ID or Unique, and fields with a Salesforce-created index (Support can create these).
+- Not indexed: long text areas, rich text, most formula fields, functions applied to fields (e.g., UPPER(Name)), and leading-wildcard LIKE ('%foo').
+
+If a predicate uses a non-indexed expression, the Query Plan will typically show a full_table_scan or index_scan with high cardinality.
+
+## Which rewrite patterns actually turn non-selective queries into selective ones?
+
+Below are three high-frequency patterns with copy-paste before/after SOQL. Run the Query Plan after each rewrite.
+
+### Pattern 1 — Remove functions and use ranges instead of derived expressions
+
+Problem: functions on indexed fields prevent index use (example: DAY_ONLY(CreatedDate) = 2026-05-01).
+
+Before (non-selective):
+
+```sql
+SELECT Id, Name FROM Lead
+WHERE DAY_ONLY(CreatedDate) = 2026-05-01
+```
+
+After (selective range on CreatedDate):
+
+```sql
+SELECT Id, Name FROM Lead
+WHERE CreatedDate >= 2026-05-01T00:00:00Z
+  AND CreatedDate < 2026-05-02T00:00:00Z
+```
+
+Why it works: no function on CreatedDate, so any system index or range optimization can be applied.
+
+### Pattern 2 — Replace cross-field ORs with multiple selective queries (union in Apex)
+
+Problem: OR across different fields (Name = 'X' OR Email = 'x@example.com') often prevents index usage.
+
+Before (non-selective):
+
+```sql
+SELECT Id, Contact.Id FROM Contact
+WHERE FirstName = 'Alice' OR LastName = 'Smith'
+```
+
+After (two selective queries in Apex then merge):
+
+```apex
+List<Contact> a = [SELECT Id, FirstName, LastName FROM Contact WHERE FirstName = 'Alice'];
+List<Contact> b = [SELECT Id, FirstName, LastName FROM Contact WHERE LastName = 'Smith'];
+Map<Id, Contact> merged = new Map<Id, Contact>(a);
+for (Contact c : b) merged.put(c.Id, c);
+// merged.values() is the union result
+```
+
+Why it works: each query can use an index on FirstName or LastName (if indexed), avoiding the OR that forces a scan.
+
+### Pattern 3 — Avoid leading wildcard LIKE; use SOSL or prefix matching
+
+Problem: LIKE '%widget%' cannot use an index. SOSL or prefix LIKE 'widget%' are selective.
+
+Before (non-selective):
+
+```sql
+SELECT Id FROM Account WHERE Name LIKE '%Acme%'
+```
+
+After (SOSL, selective full-text search):
+
+```sql
+FIND 'Acme' IN NAME FIELDS RETURNING Account(Id, Name)
+```
+
+Or, if you can enforce prefixes:
+
+```sql
+SELECT Id FROM Account WHERE Name LIKE 'Acme%'
+```
+
+Why it works: SOSL uses the full-text search engine; prefix LIKE can use an index if the platform supports it for that field.
+
+## What schema changes help when rewrites aren't enough?
+
+- Make a field External ID or Unique (Setup → Object Manager → {Object} → Fields & Relationships → New) — Salesforce automatically indexes External ID/Unique custom fields.
+- Request a custom index from Salesforce Support for high‑cardinality filters that are business-critical (Support will create a packed index for you).
+- Skinny tables: request from Support to combine commonly queried columns into a narrow table used by the query engine; this is typically available to very large orgs and carries maintenance considerations.
+- Avoid putting frequently queried predicates into formula fields. Formula fields are evaluated at runtime and are usually not indexable; if you need indexed behavior, maintain a physical field updated by trigger/Flow and index that.
+
+## How should I validate my change? (Checklist)
+
+1. Capture the baseline Query Plan (Developer Console → Query Plan). Save it.
+2. Apply the rewrite or schema change in a sandbox.
+3. Re-run the same Query Plan. Confirm Operation moved from full_table_scan to key_scan or index_scan with much lower cardinality.
+4. Run real traffic tests (bulk loads / batch jobs) to ensure no regressions. Monitor CPU and query durations.
+5. Deploy to production with change control and plan rollback for unexpected performance.
+
+## Common mistakes (and how to fix them)
+
+- **Mistake: Trusting estimated cost alone.** Fix: Compare Operation and Cardinality across plans; the operation type (full_table_scan vs key_scan) is the actionable signal.
+- **Mistake: Indexing a formula field without checking determinism.** Fix: Instead, populate a physical field via Flow/Apex and index that field or ask Support about indexing the formula (rare).
+- **Mistake: Using a single big OR in one SOQL.** Fix: Break into multiple selective queries in Apex or rewrite to an IN clause when the OR targets the same field.
+- **Mistake: Adding indexes blindly.** Fix: Confirm the filter will actually use the index (check Query Plan) — some low-selectivity indexes don't help and increase DML cost.
+- **Mistake: Running Query Plan in production without sandbox tests.** Fix: Always develop and validate in a sandbox with representative data distribution.
+
+## FAQ
+
+### How often should I run the Query Plan?
+Run it whenever you change a WHERE clause that runs against large tables or after adding indexes/schema changes. Re-run after major data-growth events.
+
+### Can I automate Query Plan capture for CI/CD?
+Yes — use the Tooling API or the Query Plan endpoint in automated tests to capture and assert plan characteristics as part of your CI pipeline.
+
+### Will adding External ID always speed queries?
+Only if your WHERE clause uses that field and the query is selective; adding indexes to low-selectivity columns can slow DML without improving read performance.
+
+### Are formula fields indexable?
+Generally no. Some deterministic formulas can be indexed by request, but the reliable pattern is to maintain a physical indexed field via Flow/Apex and use that in WHERE clauses.
+
+### What's the difference between key_scan and index_scan?
+key_scan indicates a narrow equality lookup on a key — typically the most efficient. index_scan means an index is used for a range or broader scan; it can still be efficient if cardinality is low.
+
+
+This is actionable: pick one slow query, run Developer Console → Query Plan, apply one rewrite from above, and re-run the plan to confirm a change in Operation and Cardinality.
+
+Related reading: see "The Ultimate Guide to SOQL Joins in Salesforce" for relationship traversal patterns and "Optimizing SOQL Queries for Performance in Apex" for deployment-safe query patterns (both on this site).
+
