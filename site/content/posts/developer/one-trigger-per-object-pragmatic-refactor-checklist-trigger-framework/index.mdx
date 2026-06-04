@@ -1,0 +1,203 @@
+---
+title: "One trigger per object: a pragmatic refactor checklist and working
+  Trigger Framework"
+date: 2026-06-04T09:00:00.000Z
+category: Developer
+thumbnail: one-trigger-per-object-pragmatic-refactor-checklist-trigger-framework.png
+tags:
+  - Apex
+  - Triggers
+  - Refactor
+  - CI/CD
+  - Best Practices
+  - Testing
+keywords:
+  - one trigger per object
+  - Apex trigger framework
+  - trigger refactor checklist
+  - trigger context variables
+  - Salesforce trigger best practices
+  - bulkified triggers
+  - trigger rollback sandbox
+excerpt: One trigger per object reduces unpredictable execution order and
+  recursion. This post gives a step-by-step refactor checklist, a minimal
+  bulk-safe Apex Trigger Framework, unit tests, Flow vs Apex decision rules, and
+  an automated rollback plan for sandboxes.
+---
+
+# One trigger per object: a pragmatic refactor checklist and working Trigger Framework
+
+Short answer: Use one trigger per object to centralize trigger entry points and control execution order. This post gives a runnable, bulk-safe Apex trigger framework (compilable), a migration checklist for mid-sized orgs, Flow vs Apex decision rules, sample bulk unit tests, and a short rollback script you can run in a sandbox.
+
+## Why should you adopt "one trigger per object"?
+
+Multiple independent triggers on the same object create an unpredictable execution order and increase the chance of recursion, redundant SOQL/DML, and test flakiness. One trigger per object keeps the Setup surface small, makes context variables straightforward to use, and simplifies CI/CD deployments and rollbacks.
+
+If you want a refresher on trigger context variables, see Salesforce Trigger Context Variables Explained for the exact fields and behavior in each context.
+
+## How do you decide what belongs in Flow vs Apex?
+
+Use this quick decision checklist when splitting work between Flow and Apex:
+
+- Use Flow when:
+  - The work is a single record update or simple multi-field mapping using Get Records → Decision → Update Records.
+  - It’s UI-driven (Screen Flow) or non-code admin-owned automation that needs quick edits.
+  - No complex SOQL, no cross-org callouts, no heavy loops, no custom transaction control.
+
+- Use Apex when:
+  - You need complex joins, subqueries, aggregate patterns, or to avoid extra round-trips (bulk SOQL + processing).
+  - You must call external services synchronously or perform advanced error-handling and retries.
+  - You need fine-grained control over transactions, batching, or asynchronous work (Queueable/Batchable/Platform Events).
+
+When in doubt: prefer Flow for simple record changes; choose Apex for scale, complex data access, or where Flow cannot express the logic. Link back to this site's Apex triggers best practices for patterns and anti-patterns.
+
+## How to refactor — a step-by-step checklist for mid-sized orgs (50+ triggers)
+
+1. Inventory: run SOQL + metadata report (Setup → Apex Triggers) or use SFDX to list triggers and their metadata components.
+2. Prioritize: pick objects with the most triggers, most failures in logs, or frequent change requests.
+3. Create one trigger file: add a new trigger that covers the same contexts (before insert, before update, after update, etc.).
+4. Move logic iteratively: copy small, testable pieces of logic into a new handler class. Deploy and run tests after each small move.
+5. Replace old triggers by making them no-ops (comment out body and leave metadata) until you’re confident. Then delete old trigger files in source control and deploy the consolidated trigger.
+6. Run full test suite at each commit. Use a sandbox for destructive changes and a CI validation org for final deploys.
+7. Monitor: add debug-level logs and alerts for the first week after deploy to catch regressions.
+
+If you need a refresher on trigger context variables during refactor, see Salesforce Trigger Context Variables Explained.
+
+## What a minimal, compilable Trigger Framework looks like
+
+Below is a minimal, bulk-safe, single-trigger pattern for Account. It compiles in any org (no custom metadata referenced). It includes a runtime toggle to disable triggers during rollback or maintenance.
+
+```apex
+// TriggerToggle.cls (toggle via anonymous Apex in sandbox for rollback)
+public class TriggerToggle {
+    // Flip to true in Sandbox via: TriggerToggle.disableAll = true;
+    public static Boolean disableAll = false;
+}
+
+// AccountTrigger.trigger
+trigger AccountTrigger on Account (
+    before insert, before update, before delete,
+    after insert, after update, after delete, after undelete
+) {
+    if (TriggerToggle.disableAll) return;
+    AccountTriggerHandler handler = new AccountTriggerHandler();
+
+    if (Trigger.isBefore) {
+        if (Trigger.isInsert) handler.beforeInsert(Trigger.new);
+        if (Trigger.isUpdate) handler.beforeUpdate(Trigger.new, Trigger.oldMap);
+        if (Trigger.isDelete) handler.beforeDelete(Trigger.old);
+    }
+
+    if (Trigger.isAfter) {
+        if (Trigger.isInsert) handler.afterInsert(Trigger.new);
+        if (Trigger.isUpdate) handler.afterUpdate(Trigger.new, Trigger.oldMap);
+        if (Trigger.isDelete) handler.afterDelete(Trigger.old);
+        if (Trigger.isUndelete) handler.afterUndelete(Trigger.new);
+    }
+}
+
+// AccountTriggerHandler.cls
+public with sharing class AccountTriggerHandler {
+    private static Set<String> executedContexts = new Set<String>();
+
+    private static Boolean once(String ctx) {
+        if (executedContexts.contains(ctx)) return false;
+        executedContexts.add(ctx);
+        return true;
+    }
+
+    public void beforeInsert(List<Account> newList) {
+        if (!once('Account_beforeInsert')) return;
+        for (Account a : newList) {
+            if (String.isBlank(a.Description)) a.Description = 'Handled by trigger';
+        }
+    }
+
+    public void beforeUpdate(List<Account> newList, Map<Id,Account> oldMap) {
+        if (!once('Account_beforeUpdate')) return;
+        // bulk-safe comparisons
+        List<Account> toValidate = new List<Account>();
+        for (Account a : newList) {
+            Account oldA = oldMap.get(a.Id);
+            if (oldA != null && oldA.Industry != a.Industry) toValidate.add(a);
+        }
+        // Do heavy work (SOQL/DML) outside loops
+    }
+
+    public void afterInsert(List<Account> newList) { /* async work or callouts queued here */ }
+    public void afterUpdate(List<Account> newList, Map<Id,Account> oldMap) { }
+    public void beforeDelete(List<Account> oldList) { }
+    public void afterDelete(List<Account> oldList) { }
+    public void afterUndelete(List<Account> newList) { }
+}
+```
+
+Notes: the execution guard `once(...)` prevents duplicate context processing inside the same transaction. For more advanced recursion control (per-record), extend the guard to include record Ids.
+
+## How to test and deploy safely (sample bulk unit test)
+
+Always write bulk tests that cover 200-record transactions. This test shows the framework handles bulk insert and asserts the Description is set.
+
+```apex
+@IsTest
+private class AccountTriggerHandlerTest {
+    @IsTest static void bulkInsertSetsDescription() {
+        List<Account> accts = new List<Account>();
+        for (Integer i=0;i<200;i++) accts.add(new Account(Name='T'+i));
+
+        Test.startTest();
+        insert accts;
+        Test.stopTest();
+
+        for (Account a : [SELECT Id, Description FROM Account WHERE Name LIKE 'T%']) {
+            System.assertEquals('Handled by trigger', a.Description);
+        }
+    }
+}
+```
+
+Deploy via your source-driven CI (SFDX + scratch or sandbox validation). If tests fail, do not push to production.
+
+## What is the automated rollback checklist you can run in a sandbox?
+
+1. Run anonymous Apex to toggle triggers off immediately:
+
+```apex
+// run in Developer Console or VS Code Execute Anonymous
+TriggerToggle.disableAll = true; // disables triggers that check the toggle
+```
+
+2. Revert the offending commit in your Git branch and run a CI validation build (sfdx force:source:deploy --checkonly).
+3. Run full test suite in the sandbox and review logs for errors.
+4. If you need an immediate production rollback and you cannot run code, create a quick undo deployment that restores previous trigger classes and handler classes from source control and deploy as a validated change set or via CI.
+5. After rollback verification, flip the toggle back: TriggerToggle.disableAll = false; and run smoke tests.
+
+Keep this checklist as a runbook in your repo's README for faster incident responses.
+
+## Common mistakes (and how to fix them)
+
+- **Moving everything at once.** Split into small, testable commits and deploy progressively. Revert is easier on a small change.
+- **Leaving SOQL/DML inside loops during refactor.** Pull queries and DML out of loops; use maps and collections for lookups and operate in bulk.
+- **Not writing bulk tests (only single-record tests).** Write tests with 200 records and with mixed contexts (insert → update cascade) to validate governor limits.
+- **Forgetting to handle Trigger.oldMap/Trigger.newMap when updating.** Always pass oldMap into handlers for before/after update comparisons.
+- **Relying on implicit trigger execution order.** Consolidate triggers to enforce a single entry point; don’t rely on alphabetical or deployment order.
+
+## FAQ
+
+### What exactly does "one trigger per object" mean?
+It means one trigger source file per sObject that acts as the entry point and delegates all logic to handler classes. You still split logic into many classes, but only one trigger file exists per object.
+
+### How do I prevent recursion after I refactor?
+Add per-transaction guards (static maps/sets) inside handler classes and avoid doing DML inside loops; when you must update same records, use flags and checks so subsequent trigger invocations skip re-processing.
+
+### Can I still use Flow after I move to one trigger per object?
+Yes. Use Flow for admin-editable, simple record changes and keep Apex for heavy-lifting. Document any shared behavior so admins know where to edit automation.
+
+### Do managed package triggers follow this pattern?
+You cannot edit managed package triggers. Treat package behavior as black-box and coordinate with vendor documentation; isolate your logic to avoid conflicting assumptions.
+
+### Where can I read more about trigger context variables and best practices?
+See Salesforce Trigger Context Variables Explained and Apex Triggers: Best Practices and Common Pitfalls on this site, plus the official Salesforce Developer Docs on triggers: https://developer.salesforce.com/docs.
+
+Refactor incrementally, keep your commits small, and use the Toggle + tests pattern above to run safe rollouts. Start by consolidating one low-risk object and use that momentum to clean up the rest.
+
