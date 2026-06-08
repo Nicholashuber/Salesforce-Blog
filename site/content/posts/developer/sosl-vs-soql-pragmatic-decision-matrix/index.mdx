@@ -1,0 +1,202 @@
+---
+title: "SOSL vs SOQL: a pragmatic decision matrix, performance rules, and
+  searchable examples"
+date: 2026-06-08T09:00:00.000Z
+category: Developer
+thumbnail: sosl-vs-soql-pragmatic-decision-matrix.png
+tags:
+  - SOQL
+  - SOSL
+  - Apex
+  - Search
+  - Flows
+  - Performance
+keywords:
+  - SOSL vs SOQL
+  - SOSL examples
+  - SOQL vs SOSL Apex
+  - search vs query salesforce
+  - SOSL performance
+  - bulk SOSL apex
+excerpt: "SOSL vs SOQL: use SOSL when you need free-text or multi-object search
+  and SOQL when you need predictable relational queries or aggregate data. This
+  guide gives a one-page decision matrix, bulk-safe Apex + SOSL examples,
+  performance rules, a Flow click-path for admins, common pitfalls, and a
+  checklist you can use immediately."
+---
+
+# SOSL vs SOQL: a pragmatic decision matrix, performance rules, and searchable examples
+
+Short answer
+
+SOSL vs SOQL: use SOSL when you need full-text, fuzzy, or multi-object searches; use SOQL when you need precise relational queries, joins, aggregates, or predictable ordering. Below are a one‑page decision matrix, bulk-safe Apex + SOSL examples you can drop into a sandbox, performance/gov-limit notes, a Flow click-path for admins, and a Key Takeaways checklist.
+
+## When should you use SOSL vs SOQL? (decision matrix)
+
+Use SOSL when:
+
+- You need free-text or partial matches across multiple objects (e.g., user types a string and you want Account, Contact, and Case matches).
+- You need relevance-ranked results or fuzzy matching (search-based ranking helps surface likely matches).
+- You only need a few fields (Id, Name, snippets) quickly and will follow up with a SOQL query for full records.
+
+Use SOQL when:
+
+- You need relational filters, joins (parent-to-child/child-to-parent), aggregates (COUNT, SUM), or ORDER BY.
+- You need reliable, repeatable results for automation (triggers, batch jobs) where predicates must be exact.
+- You must respect field-level filters in complex WHERE clauses or use semi-joins (IN (SELECT ...)).
+
+## What does a practical SOSL example look like in Apex?
+
+This example shows a bulk-safe utility that accepts a List<String> searchTerms, deduplicates and chunks them, runs SOSL, then returns a Map<Id,sObject>. It also demonstrates following-up with SOQL for fuller fields. Drop this into Developer Console → File → New → Apex Class.
+
+```apex
+public with sharing class BulkSearchUtil {
+    // Invocable or callable from Apex. Keep within 20 SOSL calls / transaction.
+    public static Map<Id, SObject> searchAcrossObjects(List<String> rawTerms) {
+        if (rawTerms == null || rawTerms.isEmpty()) return new Map<Id, SObject>();
+
+        // Normalize and dedupe keywords
+        Set<String> normalized = new Set<String>();
+        for (String t : rawTerms) {
+            if (String.isBlank(t)) continue;
+            // Basic sanitize: remove double quotes and parentheses which break SOSL
+            String s = t.trim().replace('"',' ').replace('(', ' ').replace(')', ' ');
+            normalized.add(s);
+        }
+        if (normalized.isEmpty()) return new Map<Id, SObject>();
+
+        // Build OR-joined search string. Chunk if too long to avoid hitting limits.
+        List<String> tokens = new List<String>(normalized);
+        Integer chunkSize = 20; // tune for your org; SOSL string length matters
+        Map<Id, SObject> resultsById = new Map<Id, SObject>();
+
+        for (Integer i = 0; i < tokens.size(); i += chunkSize) {
+            Integer end = Math.min(i + chunkSize, tokens.size());
+            List<String> slice = tokens.subList(i, end);
+            // Wrap each token in quotes for multi-word terms
+            for (Integer j=0; j<slice.size(); j++) slice[j] = '"' + slice[j] + '"';
+            String searchExpr = '(' + String.join(slice, ' OR ') + ')';
+
+            // Run SOSL once per chunk. RETURNING clause lists objects and fields.
+            List<List<SObject>> searchLists = [FIND :searchExpr IN ALL FIELDS RETURNING
+                Account(Id, Name),
+                Contact(Id, Name, Email),
+                Case(Id, Subject)
+            ];
+
+            // Flatten results into map
+            for (List<SObject> listForObject : searchLists) {
+                for (SObject s : listForObject) {
+                    resultsById.put(s.Id, s);
+                }
+            }
+        }
+
+        // If you need additional fields, follow up with an efficient SOQL query per object
+        if (!resultsById.isEmpty()) {
+            // Example: fetch Account fields for the account Ids returned
+            Set<Id> acctIds = new Set<Id>();
+            for (Id rid : resultsById.keySet()) if (rid.getSObjectType() == Account.SObjectType) acctIds.add(rid);
+            if (!acctIds.isEmpty()) {
+                for (Account a : [SELECT Id, Name, Industry, BillingCity FROM Account WHERE Id IN :acctIds]) {
+                    resultsById.put(a.Id, a);
+                }
+            }
+        }
+        return resultsById;
+    }
+}
+```
+
+Notes: this example keeps SOSL calls to a few per transaction (20-call limit) and avoids SOQL/DML in loops. Tune chunkSize to balance character length and result completeness.
+
+## How do you return IDs for bulk processing and then operate on them?
+
+Pattern: run one SOSL (or a small number of chunked SOSLs), collect Ids, then run a single SOQL per object to fetch fields you need and perform DML. Example anonymous block demonstrating usage on 200+ search terms (Developer Console → Debug → Open Execute Anonymous):
+
+```apex
+List<String> terms = new List<String>();
+for (Integer i=0;i<250;i++) terms.add('Acme ' + i);
+Map<Id,SObject> found = BulkSearchUtil.searchAcrossObjects(terms);
+System.debug('Found total: ' + found.size());
+
+// Example follow-up: mark found Accounts with a flag (bulk-safe)
+List<Account> toUpdate = new List<Account>();
+for (SObject s : found.values()) {
+    if (s instanceof Account) {
+        Account a = (Account)s;
+        a.Description = 'Found by bulk search';
+        toUpdate.add(a);
+    }
+}
+if (!toUpdate.isEmpty()) update toUpdate; // one DML
+```
+
+## When does SOSL perform better or worse than SOQL?
+
+Performance rules:
+
+- SOSL is faster when you need text matching across many objects or many fields; it uses the search index rather than table scans.
+- SOQL is better for precise filters, joins, and when you need aggregates or ordering.
+- SOSL returns relevance-ranked hits; you cannot reliably paginate by offset like SOQL's LIMIT/OFFSET—use cursor-based patterns or re-run searches.
+- SOSL per-transaction limit: 20 FIND queries. SOQL limit: 100 queries per transaction. Keep SOSL calls low in loops.
+- SOSL returns up to 2,000 records per object in a single search (see Salesforce docs). If you expect more results, use targeted SOQL with indexed fields and pagination.
+
+For official limits and behavior see the [Salesforce Developer Docs on SOSL and SOQL](https://developer.salesforce.com/docs).
+
+## How do admins create a Flow-based alternative to a global search?
+
+If you cannot add Apex, create a Screen Flow that mimics a single-object search or lists across objects via multiple Get Records elements.
+
+Setup click-path (to create a Screen Flow):
+
+1. Setup → Flows → New Flow → Screen Flow.
+2. Add Screen element: Text input (apiName: searchTerm).
+3. Add Get Records → Account where Name CONTAINS {!searchTerm} → store all records.
+4. Add Get Records → Contact where Name CONTAINS {!searchTerm} → store all records.
+5. Add Screen to show the collections (use Display Text + formulas or a Datatable component from AppExchange for nicer UI).
+6. Save → Activate.
+
+If you need multi-object free-text search in a Flow, expose an Apex @InvocableMethod that wraps a controlled SOSL (see BulkSearchUtil) and call the action from the Flow.
+
+## Common mistakes (and how to fix them)
+
+- **Running SOSL inside a loop.** Fix: concatenate terms and run SOSL once per chunk, or use a single multi-term FIND as shown above.
+- **Assuming SOSL respects all FLS/CRUD automatically.** Fix: SOSL returns sObject records; enforce field- and object-level security with with sharing and explicit field checks if exposing to users.
+- **Expecting deterministic ordering from SOSL.** Fix: collect IDs and run a SOQL ORDER BY if a predictable sort is required.
+- **Using SOSL for aggregates.** Fix: use SOQL for COUNT(), SUM(), GROUP BY.
+- **Not handling polymorphic Id types.** Fix: inspect Id.getSObjectType() before casting; SOSL returns mixed object types.
+
+## FAQ
+
+### What is the difference between SOSL and SOQL in one sentence?
+
+SOSL searches text, email, and phone fields across multiple objects using an index; SOQL queries one object at a time with precise filters, joins, and aggregates.
+
+### Can SOSL return custom object records?
+
+Yes — include the custom object's API name in the RETURNING clause (e.g., MyCustom__c(Id, Name)).
+
+### Is SOSL case-sensitive?
+
+No. SOSL is case-insensitive for standard text searches.
+
+### Can I bind Apex variables in the SOSL RETURNING WHERE clause?
+
+Yes. You can bind variables in the RETURNING WHERE clause in Apex SOSL, but keep the WHERE simple and index-friendly to avoid performance problems.
+
+### How many SOSL queries can I run in a transaction?
+
+You can run up to 20 SOSL FIND queries per Apex transaction; avoid hitting that by chunking or batching.
+
+## Key takeaways checklist
+
+- Use SOSL when you need free-text, fuzzy, or multi-object searches.
+- Use SOQL when you need joins, aggregates, ORDER BY, or deterministic results.
+- Run SOSL in bulk: dedupe keywords, chunk them, and keep SOSL calls under the 20-call limit.
+- Collect Ids from SOSL and follow up with a single SOQL per object to fetch full fields before DML.
+- Enforce FLS/CRUD and inspect Id.getSObjectType() before casting mixed results.
+
+Run the provided BulkSearchUtil in a Developer org, test with a small keyword set, and increase chunkSize only after you verify results and limits.
+
+
