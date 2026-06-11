@@ -1,0 +1,192 @@
+---
+title: "Change Data Capture vs Platform Events: pick the right real-time
+  integration for Salesforce"
+date: 2026-06-11T09:00:00.000Z
+category: Integrations
+thumbnail: change-data-capture-vs-platform-events.png
+tags:
+  - Platform Events
+  - Change Data Capture
+  - Streaming API
+  - Integrations
+  - Apex
+  - LWC
+  - CometD
+keywords:
+  - Change Data Capture vs Platform Events
+  - Salesforce CDC vs Platform Events
+  - Streaming API vs Platform Events
+  - Salesforce real-time integration
+  - CDC Salesforce consumer example
+excerpt: "Change Data Capture vs Platform Events: a practical decision guide for
+  real‑time Salesforce integrations, showing when to use CDC, Platform Events,
+  or Streaming API with examples and patterns."
+---
+
+# Change Data Capture vs Platform Events: pick the right real-time integration for Salesforce
+
+Short answer: Use Change Data Capture (CDC) when you need reliable, schema-driven replication of record changes (create/update/delete) across many standard/custom objects to external systems. Use Platform Events when you need an application-level event model (business events, commands, notifications) with custom schema and consumers. Use the Streaming API / PushTopics only for legacy or narrow-filter subscriptions. Below are criteria, architectures, runnable examples, limits, and migration tips.
+
+## What is the practical difference between CDC and Platform Events?
+
+Change Data Capture publishes record-level change events (ChangeEventHeader + payload) for Salesforce objects. It is schema-driven and ideal for data replication and audit streams. Platform Events are user-defined event objects you publish from Apex, Flow, or API to represent business events; they are not tied to record commits unless you map them yourself. The Streaming API (PushTopic) predates Platform Events and provides filtered notifications using SOQL-based topics; its use is now limited.
+
+See the Salesforce Developer Docs for the canonical reference on [Change Data Capture and Platform Events](https://developer.salesforce.com/docs).
+
+## How do I decide: guaranteed delivery, replayability, schema evolution, retention?
+
+- Guaranteed delivery: Platform Events (high-volume + durable subscribers) and CDC offer at-least-once delivery semantics. External subscribers should handle duplicates. Streaming API has lower guarantees and can drop events under pressure.
+- Replayability: CDC and Platform Events support replay IDs so consumers can resume from a missed point. Use replayId for fault recovery in your client code.
+- Schema evolution: CDC follows object schema; adding fields to an object updates the ChangeEvent payload automatically. Platform Events are explicit schema objects—update the event definition when fields change and plan producers/consumers for versioning.
+- Retention: All event buses have limited retention windows. Plan consumers to poll or replay within the retention window and persist events externally for long-term needs.
+
+## What architectures match common integration scenarios?
+
+Scenario A — Replicate Accounts to a data lake (near real-time)
+
+- Use CDC on Account. Subscribe with a durable external consumer that writes ChangeEvent payloads to your data lake (Kafka/S3/BigQuery).
+
+ASCII diagram:
+
+Client (CDC consumer) <-- Streaming /data/ChangeEvents --> Salesforce (Publish on commit)
+
+Scenario B — Sync Orders with external order system (commands + status)
+
+- Use Platform Events for order commands (OrderCreate__e) and CDC for order record replication. External system publishes OrderCreate__e; Salesforce processes via trigger/Flow and writes Order record. CDC then emits the record-level change for downstream consumers.
+
+Scenario C — Near-real-time notifications to a web app
+
+- Use Platform Events for UI notifications (small payload) and empApi (CometD) in LWC to subscribe. Platform Events map cleanly to UI messages and are easy to filter.
+
+## How to subscribe with CometD / JavaScript (external or browser)
+
+Example: Node.js + cometd + oauth sessionId (external consumer). This shows the pattern for both CDC and Platform Events—subscribe to the channel /data/ChangeEvents or /event/My_Event__e.
+
+```javascript
+// npm: cometd-nodejs-client
+const {CometD} = require('cometd');
+const cometd = new CometD();
+
+// After OAuth, use instanceUrl and accessToken
+const instanceUrl = 'https://yourInstance.salesforce.com';
+cometd.configure({url: instanceUrl + '/cometd/52.0', requestHeaders: {'Authorization': 'Bearer ' + process.env.SF_ACCESS_TOKEN}});
+
+cometd.handshake((handshake) => {
+  if (handshake.successful) {
+    // CDC channel (all change events) or specific event /data/AccountChangeEvent
+    const channel = '/data/AccountChangeEvent';
+    cometd.subscribe(channel, (message) => {
+      console.log('Received:', message);
+      // persist to data lake, ack logic, idempotency
+    });
+  } else {
+    console.error('Handshake failed', handshake);
+  }
+});
+```
+
+Notes: handle replayId in the handshake/subscribe flow and persist last-processed replayId for resume.
+
+## How to publish / react to Platform Events inside Salesforce (Apex trigger example)
+
+Platform Event trigger example that processes events in bulk and updates related records. This compiles as-is.
+
+```apex
+trigger OrderCommandTrigger on Order_Command__e (after insert) {
+  // Collect order ids referenced in events
+  Set<String> externalIds = new Set<String>();
+  for (Order_Command__e ev : Trigger.New) {
+    if (ev.External_Order_Id__c != null) externalIds.add(ev.External_Order_Id__c);
+  }
+
+  // Query existing orders by External_Id__c
+  Map<String, Order__c> ordersByExt = new Map<String, Order__c>();
+  if (!externalIds.isEmpty()) {
+    for (Order__c o : [SELECT Id, External_Id__c, Status__c FROM Order__c WHERE External_Id__c IN :externalIds]) {
+      ordersByExt.put(o.External_Id__c, o);
+    }
+  }
+
+  List<Order__c> toUpsert = new List<Order__c>();
+  for (Order_Command__e ev : Trigger.New) {
+    Order__c o = ordersByExt.get(ev.External_Order_Id__c);
+    if (o == null) o = new Order__c(External_Id__c = ev.External_Order_Id__c);
+    o.Status__c = ev.Command__c == 'FULFILL' ? 'Fulfilled' : o.Status__c;
+    toUpsert.add(o);
+  }
+
+  if (!toUpsert.isEmpty()) upsert toUpsert External_Id__c;
+}
+```
+
+This trigger follows bulk patterns: no SOQL or DML in loops and upserts in bulk.
+
+## What does an external CDC consumer pattern look like?
+
+Pattern: OAuth → CometD/EMP connector → durable checkpoint (replayId) → idempotent writer
+
+Node.js pseudo-flow:
+
+1. Obtain OAuth token via JWT or OAuth flow.
+2. Handshake to /cometd/##.0 with Authorization: Bearer token.
+3. Subscribe to /data/AccountChangeEvent (or the generic /data/ChangeEvents if using channel routing).
+4. On message, extract changeEvent.ChangeEventHeader and changeEvent.payload.
+5. Persist event and lastReplayId atomically; use that replayId on reconnect to resume.
+
+Benefits: you get full DML context (ChangeEventHeader) for reconciliation and can maintain a durable replica.
+
+## What are cost and limits considerations?
+
+- Billing: Platform Events and high-volume event usage is tied to event allocation in your contract and edition. CDC traffic falls under event bus allocations. Check your org's limits in Setup and your Salesforce contract for event allocation and overage policies.
+- Practical limits: treat the event bus as a finite, time-windowed stream. Always persist events externally if you need longer retention.
+
+Authoritative limit references: consult [Salesforce Developer Docs](https://developer.salesforce.com/docs) and your org's limits page (Setup → System Overview).
+
+## Use this when… (quick decision table)
+
+- Use Change Data Capture when: you need record-level replication, automatic schema changes with object fields, and a canonical stream for many objects.
+- Use Platform Events when: you need business-event modeling, decoupled producers/consumers, or cross-org app events not tied to a record.
+- Use Streaming API / PushTopics when: you have a legacy integration that filters on SOQL and maintains low volume; otherwise prefer Platform Events or CDC.
+
+## Migration tips for moving from PushTopics to Platform Events / CDC
+
+1. Identify the subscription surface (fields, filters) used by PushTopics.
+2. If you need record semantics and history, migrate to CDC subscriptions for those objects.
+3. If you were using PushTopics for business events, create Platform Event definitions and update publishers/consumers.
+4. Add replay and checkpoint logic in consumers before switching traffic.
+5. Test in a full sandbox with production-like event volume; measure retention and replay behavior.
+
+For related patterns, see our post on [Building Scalable Salesforce Integrations with Platform Events](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/building-scalable-salesforce-integrations-with-platform-events/index.mdx) and on integrating external sources in the data pipeline: [Unlocking Data Potential: Integrating External Data Sources with Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/data-science/unlocking-data-potential-integrating-external-data-sources-with-salesforce/index.mdx).
+
+## Common mistakes (and how to fix them)
+
+- **Treating events as durable logs** — Fix: persist events outside Salesforce immediately; use replayId only for short-term resume.
+- **Not handling duplicate deliveries** — Fix: make consumers idempotent (use natural keys or upsert patterns, persist last processed replayId).
+- **Embedding business logic in PushTopic filters** — Fix: move to Platform Events for business events or CDC for record replication; keep filters simple and stateless.
+- **Ignoring schema evolution** — Fix: version your Platform Event schema or use CDC when you want automatic field inclusion.
+- **Testing only with tiny volumes** — Fix: test with production-like event rates and simulate reconnects to validate replay and checkpoint logic.
+
+## FAQ
+
+### Which is better for replicating data to a data lake: CDC or Platform Events?
+
+Use CDC. It emits record-change payloads automatically for object commits and includes ChangeEventHeader metadata useful for reconciliation.
+
+### Can I resume a subscription after downtime?
+
+Yes. Both CDC and Platform Events support replayId. Your consumer must persist the last processed replayId and request it on reconnect.
+
+### Can I use Flows instead of Apex to publish Platform Events?
+
+Yes. You can publish platform events from Flow using the Publish Event action (Setup → Flow Designer) when you need clicks-not-code producers.
+
+### Are PushTopics deprecated?
+
+They are older technology and still supported in many orgs but avoid them for new integrations—use Platform Events or CDC depending on the need.
+
+### How do I prevent event storms from overwhelming consumers?
+
+Implement backpressure with batching and horizontal scaling of consumers, persist events immediately, and monitor event bus usage in your org.
+
+Final practical step: pick one representative integration, run a sandbox proof-of-concept using the CometD sample above, instrument replayId checkpoints, and validate behavior under expected publish rates.
+
