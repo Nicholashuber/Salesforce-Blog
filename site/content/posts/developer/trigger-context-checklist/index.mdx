@@ -1,0 +1,317 @@
+---
+title: "Trigger context checklist: 12 bulk-safe patterns every Apex trigger needs"
+date: 2026-06-15T09:00:00.000Z
+category: Developer
+thumbnail: trigger-context-checklist.png
+tags:
+  - Apex
+  - Trigger
+  - Best Practices
+  - Developer
+keywords:
+  - trigger context checklist
+  - apex trigger patterns
+  - Trigger.newMap
+  - bulk-safe trigger
+  - Apex trigger best practices
+  - Trigger.oldMap
+excerpt: A compact, copy-paste checklist of 12 bulk-safe Apex trigger patterns
+  every developer should use. Includes one-line rules, runnable code snippets,
+  governor limits to watch, and the anti-pattern to avoid so your trigger
+  survives 200+ records.
+---
+
+# Trigger context checklist: 12 bulk-safe patterns every Apex trigger needs
+
+Short answer: This trigger context checklist gives 12 concrete, bulk-safe patterns you can copy-paste into a production org today. Each pattern has a one-line rule (when to use), a runnable Apex snippet, the governor limits to watch, and an explicit anti-pattern to avoid.
+
+## What are the 12 bulk-safe trigger patterns?
+
+Below are the 12 patterns. Each H3 is a single rule, a compact snippet, the limits you must watch, and the anti-pattern.
+
+### 1) Use Trigger.new to mutate records in before triggers
+
+Rule: Use Trigger.new inside a before insert / before update to set or correct fields without doing DML.
+
+```apex
+trigger AccountBefore on Account (before insert, before update) {
+    for (Account a : Trigger.new) {
+        if (String.isBlank(a.Industry)) {
+            a.Industry = 'Unknown';
+        }
+    }
+}
+```
+
+Limits: No extra SOQL/DML; heap and CPU still apply. This pattern is free of DML limits.
+
+Anti-pattern: Doing update Trigger.new records with an explicit update statement inside a before trigger. // ❌ DO NOT do this
+
+### 2) Use Trigger.newMap / Trigger.oldMap to compare changed values
+
+Rule: Use newMap and oldMap when you need prior values or want to detect field changes in bulk updates.
+
+```apex
+trigger OppDetectStageChange on Opportunity (before update) {
+    Map<Id, Opportunity> oldMap = Trigger.oldMap;
+    for (Opportunity o : Trigger.new) {
+        Opportunity old = oldMap.get(o.Id);
+        if (old.StageName != o.StageName) {
+            // do lightweight business logic
+            o.Description = 'Stage changed from ' + old.StageName;
+        }
+    }
+}
+```
+
+Limits: Map lookups are O(1); watch CPU time for large batches. No SOQL or DML here.
+
+Anti-pattern: Querying for the old version of the same record inside the loop instead of using Trigger.oldMap.
+
+### 3) Use Trigger.oldMap on delete to access prior values
+
+Rule: On delete triggers, read Trigger.oldMap for related lookups and cleanup keys.
+
+```apex
+trigger ContactAfterDelete on Contact (after delete) {
+    Set<Id> deletedAccountIds = new Set<Id>();
+    for (Contact c : Trigger.old) {
+        if (c.AccountId != null) deletedAccountIds.add(c.AccountId);
+    }
+    // Use deletedAccountIds in one bulk query
+}
+```
+
+Limits: One SOQL outside loops (see pattern 5). DML limits if you perform updates.
+
+Anti-pattern: Using Trigger.new in a delete trigger or querying each Contact's Account in a loop.
+
+### 4) Gate logic by trigger context checks
+
+Rule: Always wrap logic with precise checks: Trigger.isBefore/isAfter and Trigger.isInsert/isUpdate/isDelete/isUndelete.
+
+```apex
+trigger GenericTrigger on CustomObject__c (before insert, after update, after delete) {
+    if (Trigger.isBefore && Trigger.isInsert) {
+        // defaulting logic
+    }
+    if (Trigger.isAfter && Trigger.isUpdate) {
+        // external notifications
+    }
+}
+```
+
+Limits: None directly; improves clarity and avoids accidental DML in wrong context.
+
+Anti-pattern: Relying on positional code rather than explicit context checks, which causes surprises on future changes.
+
+### 5) Bulkify SOQL: collect Ids and query once
+
+Rule: Gather a Set<Id> (or keys) and perform a single SOQL outside loops.
+
+```apex
+trigger AccountAfterUpdate on Account (after update) {
+    Set<Id> accIds = new Set<Id>();
+    for (Account a : Trigger.new) accIds.add(a.Id);
+    Map<Id, Account> fresh = new Map<Id,Account>([SELECT Id, Name FROM Account WHERE Id IN :accIds]);
+    // work with fresh map
+}
+```
+
+Limits: SOQL queries per transaction: 100 (sync). Watch combined queries called by other triggers.
+
+Anti-pattern: Running a SOQL inside a for loop over Trigger.new.
+
+### 6) Bulkify DML: collect sObjects and DML once
+
+Rule: Add modified records to a List and call insert/update outside the loop.
+
+```apex
+public with sharing class ContactUpdater {
+    public static void updateContacts(List<Contact> toUpdate) {
+        if (!toUpdate.isEmpty()) update toUpdate;
+    }
+}
+
+trigger AccountAfter on Account (after update) {
+    List<Contact> updates = new List<Contact>();
+    // collect contact changes
+    ContactUpdater.updateContacts(updates);
+}
+```
+
+Limits: DML statements per transaction: 150; DML rows: 10,000.
+
+Anti-pattern: Calling update inside a loop for each contact.
+
+### 7) Use before triggers for validation and computed fields, after triggers for DML/side-effects
+
+Rule: Change record fields in before triggers; do external operations and DML in after triggers.
+
+```apex
+// before trigger adjusts fields (shown earlier). After trigger example:
+trigger OpportunityAfter on Opportunity (after insert) {
+    // callout preparation, queueable jobs, or update related objects
+}
+```
+
+Limits: For callouts use Queueable or @future; callouts are not allowed in a synchronous after trigger unless done asynchronously.
+
+Anti-pattern: Performing callouts or external web requests directly inside a synchronous trigger.
+
+### 8) Guard recursion with a static processed Ids set
+
+Rule: Use a handler class with static state to prevent the same record being processed repeatedly in one transaction.
+
+```apex
+public class TriggerGuard {
+    public static Set<Id> processed = new Set<Id>();
+}
+
+trigger CaseAfter on Case (after update) {
+    List<Case> toUpdate = new List<Case>();
+    for (Case c : Trigger.new) {
+        if (TriggerGuard.processed.contains(c.Id)) continue;
+        // mark and queue work
+        TriggerGuard.processed.add(c.Id);
+    }
+}
+```
+
+Limits: Static variables last for the transaction only; they do not persist across transactions.
+
+Anti-pattern: Using a boolean static flag only (false positive across multi-record operations) or making updates that re-fire the trigger with no guard.
+
+### 9) Expose a test-friendly bypass flag
+
+Rule: Provide a public static Set or boolean in a utility class to bypass triggers during bulk data loads or tests.
+
+```apex
+public class TriggerControl {
+    public static Boolean bypassAll = false; // set in tests
+}
+
+trigger LeadAfter on Lead (after insert) {
+    if (TriggerControl.bypassAll) return;
+    // normal flow
+}
+```
+
+Limits: Use sparingly and only for explicit migration/test scenarios.
+
+Anti-pattern: Hiding bypasses behind undocumented Custom Settings nobody knows about.
+
+### 10) Offload heavy work to Queueable/Batchable to stay within CPU limits
+
+Rule: If you need many SOQLs, heavy processing, or callouts, enqueue a Queueable job with batched work.
+
+```apex
+public class HeavyWorkJob implements Queueable {
+    public void execute(QueueableContext ctx) {
+        // single-threaded chunk of work
+    }
+}
+
+// in trigger:
+System.enqueueJob(new HeavyWorkJob());
+```
+
+Limits: Async jobs have higher SOQL limits (200) and longer CPU/heap allowances; watch total async jobs enqueued (50 queued jobs per 24 hours for some limits). See docs.
+
+Anti-pattern: Trying to process thousands of records synchronously inside the trigger.
+
+### 11) Prefer Change Data Capture for integration and event-driven flows
+
+Rule: Use CDC when you need an immutable event stream for integrations, replication, or decoupled processing.
+
+```apex
+trigger AccountCDC on AccountChangeEvent (after insert) {
+    for (AccountChangeEvent e : Trigger.new) {
+        // e.ChangeEventHeader.recordIds and e.payload fields
+        System.debug('CDC event for: ' + e.ChangeEventHeader.getRecordIds());
+    }
+}
+```
+
+Limits: CDC events provide guaranteed ordering per transaction and are built for integration scale. See developer docs on delivery guarantees.
+
+Anti-pattern: Building complex integration logic inside CRUD triggers instead of subscribing to events.
+
+### 12) Use targeted addError and try/catch for partial failure handling
+
+Rule: Validate per-record and call addError on the specific sObject to prevent an all-or-nothing failure when appropriate.
+
+```apex
+trigger InvoiceBeforeInsert on Invoice__c (before insert) {
+    for (Invoice__c i : Trigger.new) {
+        try {
+            if (i.Amount__c < 0) {
+                i.addError('Amount must be positive');
+            }
+        } catch (Exception ex) {
+            i.addError('System error: ' + ex.getMessage());
+        }
+    }
+}
+```
+
+Limits: addError prevents DML for the current record only. Avoid logging excessive stack traces to the debug log in bulk.
+
+Anti-pattern: Catching Exception and then throwing a new generic exception that fails the whole transaction without addError.
+
+## How should I structure a trigger handler for maintainability?
+
+Action: Use one trigger per object that delegates to a handler class. Keep the trigger itself to context checks and a single handler call.
+
+```apex
+// Setup → Object Manager → Account → Triggers
+trigger AccountTrigger on Account (before insert, before update, after update, after delete) {
+    if (Trigger.isBefore && Trigger.isInsert) AccountTriggerHandler.onBeforeInsert(Trigger.new);
+    if (Trigger.isBefore && Trigger.isUpdate) AccountTriggerHandler.onBeforeUpdate(Trigger.new, Trigger.oldMap);
+    if (Trigger.isAfter && Trigger.isUpdate)  AccountTriggerHandler.onAfterUpdate(Trigger.newMap);
+}
+
+public with sharing class AccountTriggerHandler {
+    public static void onBeforeInsert(List<Account> newRecs) {
+        // implement patterns above
+    }
+    public static void onBeforeUpdate(List<Account> newRecs, Map<Id,Account> oldMap) {}
+    public static void onAfterUpdate(Map<Id,Account> newMap) {}
+}
+```
+
+This pattern keeps context routing in the trigger and logic in testable classes. See [Salesforce Trigger Context Variables Explained](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/salesforce-trigger-context-variables-explained/index.mdx) for deeper context variable guidance and [Comparing Old and New Values in an Apex Trigger](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/comparing-old-and-new-values-in-an-apex-trigger/index.mdx) for comparison patterns.
+
+## When should you use Change Data Capture instead of triggers?
+
+Action: Choose CDC when you need a durable event stream for external systems, when you want to avoid transactional coupling, or when updates should not run during the CRUD transaction. Use triggers for synchronous enforcement and per-record validation.
+
+See developer docs on Change Data Capture for delivery semantics: https://developer.salesforce.com/docs
+
+## Common mistakes
+
+- **Putting SOQL or DML inside a loop** — Move SOQL/DML outside the loop and batch operations. Fix: collect Ids and do one query/update.
+- **Mutating records via DML inside a before trigger** — Modify Trigger.new directly instead of calling update. Fix: remove the extra DML.
+- **No recursion guard for triggers that update the same object** — Add a static Set<Id> or processed flag in a handler. Fix: implement the TriggerGuard pattern.
+- **Testing without toggling bypass flags** — Tests silently fail or pollute data. Fix: set and reset TriggerControl.bypassAll in test setup/teardown.
+- **Performing callouts synchronously in a trigger** — This causes runtime failures. Fix: enqueue a Queueable that does the callout.
+
+## FAQ
+
+### When should I use Trigger.newMap vs Trigger.new?
+Use Trigger.newMap when you need to look up records by Id or compare old vs new in an update/delete. Use Trigger.new when you only need to iterate and modify fields in bulk.
+
+### Can I perform DML in a before trigger?
+You should not. Modify the Trigger.new records directly in before triggers. Performing DML on the same sObject causes extra recursion and consumes DML limits.
+
+### How do I test recursion guards in unit tests?
+Set the static guard to a known state (e.g., clear the Set or set bypass flag) in @TestSetup, then assert that subsequent updates do not reprocess records.
+
+### When is Change Data Capture a better choice than triggers?
+Choose CDC when integrations need an event stream or when you want to decouple downstream processing from the transactional lifecycle of the original record.
+
+### What governor limits matter most in triggers?
+Key limits: SOQL queries per transaction (100 sync), DML statements (150), DML rows (10,000), and CPU time (10,000 ms). For authoritative numbers see Salesforce Developer Docs: https://developer.salesforce.com/docs
+
+One practical next step: copy the handler and guard snippets into your sandbox, convert one of your object triggers to the single-trigger-delegate pattern above, and run the unit tests.
+
