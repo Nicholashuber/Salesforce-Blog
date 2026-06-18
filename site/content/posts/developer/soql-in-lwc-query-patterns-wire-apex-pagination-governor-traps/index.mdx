@@ -1,0 +1,206 @@
+---
+title: "SOQL in LWC: query patterns for @wire vs Apex, server-side pagination,
+  and avoiding governor traps"
+date: 2026-06-18T09:00:00.000Z
+category: Developer
+thumbnail: soql-in-lwc-query-patterns-wire-apex-pagination-governor-traps.png
+tags:
+  - SOQL
+  - LWC
+  - Apex
+  - Performance
+  - Pagination
+  - Security
+keywords:
+  - SOQL in LWC
+  - LWC SOQL
+  - wire vs apex
+  - server-side pagination
+  - keyset pagination
+  - SOQL performance
+  - cacheable apex
+excerpt: "SOQL in LWC is about choosing the right surface to run your query:
+  Lightning Data Service for single records, @wire(cacheable=true) Apex for
+  reactive lists, and imperative Apex for on-demand or DML-coupled queries. This
+  post shows working LWC + Apex examples for OFFSET, keyset pagination, and
+  secure SOQL with FLS checks, plus performance and governor-limit notes."
+---
+
+# SOQL in LWC: query patterns for @wire vs Apex, server-side pagination, and avoiding governor traps
+
+Short answer: Use Lightning Data Service (@wire(getRecord) / uiRecordApi) for single-record UI state, use @wire to an @AuraEnabled(cacheable=true) Apex method for reactive read-only lists, and use imperative Apex calls when you need on-demand control, complex filtering, or to chain DML. For pagination prefer keyset (cursor) pagination for large datasets, OFFSET for small/low-offset pages, and REST/SOAP queryMore or Batch QueryLocator when you must iterate >50k rows. Always bind variables, use WITH SECURITY_ENFORCED or Security.stripInaccessible, and respect Apex governor limits (100 SOQL queries/transaction, 50,000 rows retrieved).
+
+## How do I choose between Lightning Data Service, @wire Apex, and imperative Apex?
+
+- Lightning Data Service (LDS) — Setup → lightning/uiRecordApi in LWC. Use for single-record read/write UIs (record forms, record-detail components). It avoids authoring SOQL and benefits from shared caching and field-level security enforcement.
+- @wire to Apex with cacheable=true — Best for reactive lists and search widgets that should auto-refresh when params change. Requires the Apex method to be read-only (no DML) and annotated with @AuraEnabled(cacheable=true).
+- Imperative Apex (Apex called from JS) — Use when you need explicit control: run-on-click, complex filters, dynamic limits, or when you need to call non-cacheable server logic.
+
+Use the following quick comparator:
+
+| Option | Use this when… | Pros | Cons |
+|---|---:|---|---|
+| lightning/uiRecordApi (@wire(getRecord)) | single-record UI, forms, field-level cache | FLS respected, no Apex, built-in caching | Not for lists or complex joins |
+| @wire(...) to Apex (cacheable=true) | reactive lists/search with stable params | client caching, reactive, simple wiring | No DML, must be deterministic, careful with large result sets |
+| Imperative Apex | on-demand load, complex paging logic, dynamic filters | full control, can return complex wrappers | extra code, counts toward Apex governor limits |
+| REST query + queryMore / QueryLocator | export/large iteration (>50k) | stream large result sets | more infra (Auth, REST calls), not typical for LWC UI |
+
+## How to write secure, bind-variable SOQL for LWC + Apex
+
+Always bind variables (no string concatenation). Prefer WITH SECURITY_ENFORCED to have SOQL throw when fields are inaccessible, or use Security.stripInaccessible to remove fields from sObjects. Never build a WHERE clause by concatenating user input.
+
+Apex example (cacheable, safe):
+
+```apex
+public with sharing class AccountGalleryController {
+    @AuraEnabled(cacheable=true)
+    public static List<Account> getAccountsBySearch(String search, Integer pageSize, Integer offset) {
+        String searchPattern = '%' + search.escapeSingleQuotes() + '%';
+        // WITH SECURITY_ENFORCED ensures FLS and field-level read checks.
+        return [
+            SELECT Id, Name, Phone, Industry
+            FROM Account
+            WHERE Name LIKE :searchPattern
+            ORDER BY CreatedDate DESC
+            LIMIT :pageSize
+            OFFSET :offset
+            WITH SECURITY_ENFORCED
+        ];
+    }
+}
+```
+
+Notes: cacheable=true methods must not perform DML. Use escapeSingleQuotes when you must build a LIKE pattern.
+
+If you need to quietly remove fields the caller can't see, run:
+
+```apex
+List<SObject> safeRecords = (List<SObject>) Security.stripInaccessible(
+    AccessType.READABLE, (List<SObject>) rawRecords
+).getRecords();
+```
+
+## How to implement server-side pagination patterns (working LWC + Apex)
+
+Three patterns with code: OFFSET pagination, keyset pagination, and queryMore via REST.
+
+### OFFSET pagination (simple)
+Works for small datasets and low offsets (OFFSET supports up to 2,000 rows). Bad for deep pages.
+
+Apex (cacheable):
+
+```apex
+@AuraEnabled(cacheable=true)
+public static List<Account> fetchOffset(Integer pageSize, Integer offset) {
+    return [
+        SELECT Id, Name, BillingCity, CreatedDate
+        FROM Account
+        ORDER BY CreatedDate DESC
+        LIMIT :pageSize OFFSET :offset
+        WITH SECURITY_ENFORCED
+    ];
+}
+```
+
+LWC (wire to Apex):
+
+```javascript
+// accountsList.js
+import { LightningElement, wire, api, track } from 'lwc';
+import fetchOffset from '@salesforce/apex/AccountGalleryController.fetchOffset';
+
+export default class AccountsList extends LightningElement {
+  @api pageSize = 20;
+  @track offset = 0;
+
+  @wire(fetchOffset, { pageSize: '$pageSize', offset: '$offset' })
+  wiredAccounts;
+
+  nextPage() { this.offset += this.pageSize; }
+  prevPage() { this.offset = Math.max(0, this.offset - this.pageSize); }
+}
+```
+
+```html
+<!-- accountsList.html -->
+<template>
+  <template if:true={wiredAccounts.data}>
+    <template for:each={wiredAccounts.data} for:item="acct">
+      <div key={acct.Id}>{acct.Name} — {acct.BillingCity}</div>
+    </template>
+  </template>
+</template>
+```
+
+### Keyset (cursor) pagination — recommended for large tables
+Use stable ORDER BY columns and a WHERE clause that references the last seen key. This avoids OFFSET's performance cliffs.
+
+Apex (cacheable):
+
+```apex
+@AuraEnabled(cacheable=true)
+public static List<Account> fetchKeyset(Integer pageSize, Datetime lastCreated) {
+    if (lastCreated == null) {
+        return [
+            SELECT Id, Name, CreatedDate
+            FROM Account
+            ORDER BY CreatedDate DESC
+            LIMIT :pageSize
+            WITH SECURITY_ENFORCED
+        ];
+    }
+    return [
+        SELECT Id, Name, CreatedDate
+        FROM Account
+        WHERE CreatedDate < :lastCreated
+        ORDER BY CreatedDate DESC
+        LIMIT :pageSize
+        WITH SECURITY_ENFORCED
+    ];
+}
+```
+
+LWC calls this imperatively when the user requests "next" and stores the last record's CreatedDate as the cursor.
+
+### queryMore / QueryLocator for huge exports
+If your UI needs to iterate extremely large result sets, use REST API query + queryMore or run a Batchable that writes to a temporary store. LWC rarely talks directly to queryMore; prefer a server-side job and then surface results from an indexed table.
+
+See the REST query docs: https://developer.salesforce.com/docs for query/queryMore examples.
+
+## What performance and governor-limit concerns should I watch for?
+
+- Apex governor limits: 100 SOQL queries per transaction (synchronous), 50,000 rows retrieved. Each Apex call from LWC is its own transaction — but server calls are still expensive.
+- cacheable=true reduces server load and benefits from client-side caching. Use it for idempotent reads.
+- Query selectivity: Filter on indexed fields (Id, lookup fields, custom indexed fields). If your filter is not selective, the query will do a full table scan and timeout. Use the Query Plan tool in Developer Console to inspect indexes and cost.
+- OFFSET high values degrade performance; prefer keyset pagination for large lists.
+- Avoid SOQL in loops; bulkify Apex. If you return large result sets, map to lightweight DTOs (only return the fields the UI needs).
+
+For a deeper SOQL performance guide see [Optimizing SOQL Queries for Performance in Apex](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/optimizing-soql-queries-for-performance-in-apex/index.mdx) and [Mastering SOQL: Salesforce Object Query Language Explained](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/mastering-soql-salesforce-object-query-language-explained/index.mdx).
+
+## Common mistakes (and how to fix them)
+
+- **Building dynamic WHERE clauses by concatenation.** Fix: Always use bind variables or escapeSingleQuotes when composing LIKE patterns.
+- **Using OFFSET for deep paging.** Fix: Use keyset pagination (WHERE lastKey < :cursor) for stable, fast pages.
+- **Calling non-cacheable Apex from @wire.** Fix: Annotate read methods with @AuraEnabled(cacheable=true) and separate DML into a different non-cacheable method called imperatively.
+- **Ignoring field-level security.** Fix: Use WITH SECURITY_ENFORCED in SOQL or Security.stripInaccessible before returning records to the client.
+- **Returning entire sObjects when the UI needs 3 fields.** Fix: Return a DTO or select only the fields the component needs to reduce heap and network payload.
+
+## FAQ
+
+### When should I use @wire(getRecord) vs @wire to Apex?
+Use @wire(getRecord) for single-record forms or detail components because LDS enforces FLS and shares cache. Use @wire to Apex for lists, searches, or when you need custom joins or aggregate logic.
+
+### Can I use @AuraEnabled(cacheable=true) for queries that perform DML?
+No. Methods annotated cacheable=true must be read-only. Perform DML in non-cacheable methods called imperatively.
+
+### How do I prevent SOQL injection from LWC user input?
+Bind variables (SELECT ... WHERE Name LIKE :searchPattern). When you need to build a pattern include search.escapeSingleQuotes(), or better sanitize input server-side.
+
+### What pagination method scales best for UIs with many thousands of rows?
+Keyset (cursor) pagination scales best. It avoids OFFSET and is predictable even with large datasets.
+
+### Does lightning/uiRecordApi count against Apex SOQL limits?
+No — Lightning Data Service does not execute Apex SOQL and does not count against Apex SOQL governor limits; it uses platform read paths and benefits from shared caching and LDS optimizations.
+
+Next step: pick one list component in your app and replace OFFSET paging with keyset paging and an @AuraEnabled(cacheable=true) Apex method to see immediate latency improvements.
+
