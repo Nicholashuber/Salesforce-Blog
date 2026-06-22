@@ -1,0 +1,211 @@
+---
+title: "Permission Set Groups migration: a pragmatic migration playbook for
+  large Salesforce orgs"
+date: 2026-06-22T09:00:00.000Z
+category: Administrator
+thumbnail: permission-set-groups-migration-playbook.png
+tags:
+  - Permission Sets
+  - Profiles
+  - Flow
+  - Apex
+  - Security
+keywords:
+  - permission set groups migration
+  - migrate from profiles to permission set groups
+  - permission set assignment automation
+  - PermissionSetAssignment Apex
+  - PermissionSet migration playbook
+excerpt: A step-by-step, production-safe playbook for permission set groups
+  migration in 1,000+ user orgs. Includes audit checklist, SOQL/Apex permission
+  matrix extraction, Flow and Apex assignment patterns, rollback safety, and
+  change communications.
+---
+
+# Permission Set Groups migration: a pragmatic migration playbook for large Salesforce orgs
+
+Short answer: Move profile-based permissions into Permission Sets and Permission Set Groups in phases: audit your existing profiles, extract a permission matrix with SOQL/Apex, create modular Permission Sets, roll out via automated assignments (Flow + bulk Apex for backfills), and keep fast rollback hooks and communications ready. This playbook gives copy-paste SOQL and Apex, Flow designs, and the org-level checklist you need to run this in a 1,000+ user org.
+
+## Why does a permission set groups migration matter?
+
+Large orgs accumulate dozens (often hundreds) of custom profiles that are impossible to maintain, audit, or reuse. Permission Set Groups let you compose roles from modular Permission Sets, reduce profile sprawl, and enable least-privilege changes without new Profile deployments.
+
+## How do you audit and decide what to keep or merge?
+
+Audit checklist (run this before you touch production):
+
+- Inventory: extract every Profile and PermissionSet in the org.
+- Active users: list users by Profile (Setup → Users → Users) and count active assignments.
+- Business mappings: map Profiles to business roles (sales, service, partner, integrations).
+- Keep vs Merge rules:
+  - Keep: system-critical Profiles that are managed by apps or Salesforce (e.g., Standard User variants with packaged restrictions) — convert only after partner validation.
+  - Merge: Profiles that differ only by a small set of permissions (ViewAll / ModifyAll / object access) into a base Permission Set + small add-ons.
+  - Remove: unused Profiles (0 active users and not referenced in automation or sharing rules).
+- Ownership & approvals: get sign-off from each business owner before changing their role.
+
+Quick decision heuristic: if two profiles differ by fewer than 10 permission fields (object, field, or system perms), create one base Permission Set and one small add-on Permission Set rather than a new Profile.
+
+## How to extract a permission matrix (SOQL + Apex)
+
+Run these queries in Developer Console or as an Apex script in a sandbox to get a starting matrix. The approach: treat Profiles as PermissionSet records where IsOwnedByProfile = true.
+
+SOQL snippets:
+
+```sql
+-- List Permission Sets that are profiles
+SELECT Id, Name, IsOwnedByProfile, ProfileId FROM PermissionSet WHERE IsOwnedByProfile = true
+
+-- Assignments (users) for permission sets
+SELECT Id, AssigneeId, PermissionSetId, PermissionSet.Name FROM PermissionSetAssignment WHERE PermissionSetId IN (SELECT Id FROM PermissionSet)
+
+-- Object-level permissions for permission sets
+SELECT Id, PermissionSetId, SobjectType, PermissionsRead, PermissionsCreate, PermissionsEdit, PermissionsDelete, PermissionsViewAllRecords, PermissionsModifyAllRecords FROM ObjectPermissions WHERE PermissionSetId IN (SELECT Id FROM PermissionSet)
+
+-- Field-level permissions
+SELECT Id, ParentId, Field, PermissionsEdit, PermissionsRead FROM FieldPermissions WHERE ParentId IN (SELECT Id FROM PermissionSet)
+```
+
+A bulk-safe Apex extractor you can run in Execute Anonymous (sandbox / Dev edition):
+
+```apex
+// Apex: Export permission set matrix (run in Execute Anonymous in Sandbox)
+Map<Id, PermissionSet> psById = new Map<Id, PermissionSet>([
+  SELECT Id, Name, IsOwnedByProfile, ProfileId FROM PermissionSet WHERE IsOwnedByProfile = true OR IsOwnedByProfile = false
+]);
+Set<Id> psIds = psById.keySet();
+List<ObjectPermissions> objPerms = [SELECT PermissionSetId, SobjectType, PermissionsRead, PermissionsCreate, PermissionsEdit, PermissionsDelete, PermissionsViewAllRecords, PermissionsModifyAllRecords FROM ObjectPermissions WHERE PermissionSetId IN :psIds];
+List<FieldPermissions> fldPerms = [SELECT ParentId, Field, PermissionsRead, PermissionsEdit FROM FieldPermissions WHERE ParentId IN :psIds];
+List<PermissionSetAssignment> assigns = [SELECT PermissionSetId, AssigneeId FROM PermissionSetAssignment WHERE PermissionSetId IN :psIds];
+System.debug('PermissionSets:' + psById.size() + ' ObjectPerms:' + objPerms.size() + ' FieldPerms:' + fldPerms.size() + ' Assignments:' + assigns.size());
+// Build a CSV or send to an external system for analysis.
+```
+
+Use the CSV output to produce a matrix of ProfileName ↔ Object/Field/System permission booleans. That matrix drives which Permission Sets to create.
+
+Related reading: [Salesforce Permission Sets vs Profiles: A Complete Guide for Admins](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/administrator/salesforce-permission-sets-vs-profiles-a-complete-guide-for-admins/index.mdx)
+
+## How to design Permission Sets and Permission Set Groups (modular strategy)
+
+Principles:
+
+- One responsibility per Permission Set: Object access for Account, Opportunity, and Field-level read/edit for explicit fields.
+- Create small add-on Permission Sets for elevated rights (Modify All, View All, Manage Users) rather than baking them into base roles.
+- Permission Set Groups = role composition: combine base + region + escalations.
+
+Example composition:
+
+- Sales Base (Account/Contact read/write, Opportunity read/write)
+- Sales Reports (report folders & run reports permissions)
+- Sales Admin Add-on (Manage Leads, Manage Campaigns)
+- Sales - APAC (region-specific sharing and app access)
+
+## How to roll out: phased plan with assignment automation
+
+Phased rollout (recommended for 1,000+ users):
+
+1. Pilot (10–50 users): pick a business unit, create Permission Sets and a Permission Set Group, assign manually and validate.
+2. Backfill in sandbox: run your Apex backfill to assign Permission Sets to users matching old Profiles.
+3. Production soft-launch: assign to a controlled group via Flow-driven automation, monitor for errors for 1–2 weeks.
+4. Full cutover: deactivate old Profiles (or restrict login) and assign Permission Set Groups to remaining users.
+5. Cleanup: delete unused Profiles after 30–90 days.
+
+Permission Set Assignment Automation (Record-Triggered Flow example):
+
+Setup breadcrumb: Setup → Process Automation → Flows → New → Record-Triggered Flow (User, After Save)
+
+Flow outline:
+
+- Trigger: User record updated (ProfileId changed OR isCreated)
+- Get Records: PermissionSet WHERE Name = 'Sales Base'
+- Decision: If user.ProfileId IN (old profile ids for Sales)
+- Create Records: PermissionSetAssignment (AssigneeId = $Record.Id, PermissionSetId = {!SalesBase.Id})
+
+If you need bulk backfill for thousands of users, use an Apex batch job instead of a single large Flow.
+
+Apex bulk assignment (Queueable + bulk-safe):
+
+```apex
+public class BulkAssignPermissionSet implements Database.Batchable<sObject> {
+  Id permissionSetId;
+  public BulkAssignPermissionSet(Id psId){ permissionSetId = psId; }
+  public Database.QueryLocator start(Database.BatchableContext bc){
+    return Database.getQueryLocator([SELECT Id FROM User WHERE ProfileId IN :new Set<Id>{'00e...','00e...'} AND IsActive = true]);
+  }
+  public void execute(Database.BatchableContext bc, List<User> scope){
+    List<PermissionSetAssignment> assigns = new List<PermissionSetAssignment>();
+    for(User u : scope){
+      assigns.add(new PermissionSetAssignment(AssigneeId = u.Id, PermissionSetId = permissionSetId));
+    }
+    try{ insert assigns; } catch(DmlException e){
+      // handle partial failures, log to custom object
+    }
+  }
+  public void finish(Database.BatchableContext bc){ }
+}
+
+// Run: System.enqueueJob(Database.executeBatch(new BulkAssignPermissionSet('0PSxxxxxxxxxxxxx'), 200));
+```
+
+## How to build rollback safety patterns
+
+- Always log every automated assignment into an audit custom object (PermissionSetAssignment_Audit__c) with fields: UserId, PermissionSetId, Operation, Source, Timestamp.
+- Before any bulk change, snapshot current PermissionSetAssignment rows for affected users (export or store in a custom object) so you can bulk-delete or restore.
+- Provide a single-button rollback (Flow or Apex) that deletes PermissionSetAssignment records matching your snapshot and re-applies the saved set.
+
+Rollback Apex snippet (delete by snapshot):
+
+```apex
+List<PermissionSetAssignment> toDelete = [SELECT Id FROM PermissionSetAssignment WHERE PermissionSetId = :psId AND AssigneeId IN :userIds];
+delete toDelete;
+```
+
+## What communications and training should you run?
+
+Org-change communications checklist:
+
+- Stakeholder map: owners for Sales, Service, IT, Security, Integrations.
+- Pre-cutover email: announce dates, what will change, and where to report issues.
+- Training: 30-minute role-specific walk-throughs and short job-aids listing new app tabs and how to request extra permissions.
+- Support window: staffed support during cutover + escalation contact.
+- Rollback plan: explicit steps and owner for rollback with expected downtime.
+
+Example subject line: "Permission Model change (Profiles → Permission Set Groups) — pilot starting May 10". Attach a short FAQ and an opt-out/feedback link.
+
+## Comparison: Profile vs Permission Set vs Permission Set Group
+
+| When to use | Profile | Permission Set | Permission Set Group |
+|---|---:|---:|---:|
+| Primary purpose | Authentication, baseline UI & licensing | Add permissions to users | Compose Permission Sets into role bundles |
+| Assignable | Users only | Users (and permission set group assignment) | PermissionSetAssignment created for each permission set in the group |
+| Good for | License + login/UX defaults | Granular object/field/system perms | Role-level bundles across orgs / reuse |
+| Change friction | High — requires Profile changes & deployments | Low — assign/unassign instantly | Low — assign a single group to change multiple permissions |
+| Best practice | Keep minimal (profiles per license) | Modularize permissions | Use for role composition and temporary escalations |
+
+## Common mistakes (and how to avoid them)
+
+- **Mistake:** Recreating the same monolith as a Permission Set (one-per-profile). Fix: break permissions into small, reusable Permission Sets and combine via Permission Set Groups.
+- **Mistake:** Running a single massive Flow to assign thousands of users. Fix: use Batch Apex for backfills and use Flows for event-driven, small assignments.
+- **Mistake:** Not auditing third-party packaged profiles. Fix: identify managed profiles and coordinate with ISV before changing related permissions.
+- **Mistake:** Not keeping a snapshot for rollback. Fix: always export PermissionSetAssignment for affected users before changes and log operations.
+
+## FAQ
+
+### How long should a migration take for a 1,000+ user org?
+A phased migration typically takes 6–12 weeks: 2 weeks audit/design, 2–4 weeks pilot and sandbox backfill, 2–4 weeks production rollout and cleanup. Timing depends on number of business owners and packaged profiles.
+
+### Can Profiles be deleted after migration?
+Only delete a Profile after it has zero active users and is not referenced by automation, sharing rules, or Apex. Keep a record for 30–90 days before deletion.
+
+### Will Permission Set Groups change sharing rules or record ownership?
+No. Permission Sets and Permission Set Groups affect access checks and permissions; they do not change sharing rules or record ownership.
+
+### Do PermissionSetAssignment records count against governor limits?
+Creating or deleting PermissionSetAssignment records consumes DML but follows the standard DML limits (150 DML statements per transaction, 10,000 rows in a single DML). Use batch Apex for large volumes.
+
+### Where can I find Salesforce docs on PermissionSet objects?
+See the official Salesforce Developer Docs for PermissionSet, PermissionSetAssignment, ObjectPermissions, and FieldPermissions: https://developer.salesforce.com/docs
+
+
+Make one plan, run a short pilot, log everything, and prefer small, composable Permission Sets over monolithic copies of old Profiles. When you need automation examples, start with the Apex snippets above and use Flows for event-driven assignments.
+
+
