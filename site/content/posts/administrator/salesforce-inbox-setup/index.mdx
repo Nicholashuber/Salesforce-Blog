@@ -1,0 +1,205 @@
+---
+title: "Salesforce Inbox setup: install, OAuth, mailbox permissions, and
+  automation recipes for Gmail & Outlook"
+date: 2026-06-29T09:00:00.000Z
+category: Administrator
+thumbnail: salesforce-inbox-setup.png
+tags:
+  - Inbox
+  - OAuth
+  - Gmail
+  - Outlook
+  - Integration
+  - Permission Sets
+  - Flow
+keywords:
+  - Salesforce Inbox setup
+  - Salesforce Inbox permissions
+  - Inbox OAuth Salesforce
+  - Inbox Gmail integration
+  - Inbox Outlook install
+excerpt: "A hands-on admin playbook for Salesforce Inbox setup: install the
+  package, configure Gmail and Outlook OAuth scopes, assign exact permission
+  sets, diagnose common failures, and three production automation recipes
+  (auto-log to Opportunity, route tracked emails to queues, and bulk-enable
+  Inbox via API). Get Inbox working for a team in 30–60 minutes."
+---
+
+# Salesforce Inbox setup: install, OAuth, mailbox permissions, and automation recipes for Gmail & Outlook
+
+Short answer
+
+Install the Salesforce Inbox managed package from AppExchange, assign the packaged Inbox permission sets to users, register OAuth apps in Google Cloud and Azure AD using Graph/Gmail scopes, and verify tokens in Setup → Connected Apps OAuth Usage. If you need automation, use record-triggered Flows on EmailMessage (or Task) to auto-log to Opportunities, route tracked messages to queues, and bulk-assign the Inbox permission set using the Data API or sfdx and PermissionSetAssignment records.
+
+## What are the minimum steps to install Salesforce Inbox?
+
+1. Install package: AppExchange → search "Salesforce Inbox" → Install in Production or Sandbox. Allow access to admins only for initial validation. Package creates permission sets named like "Inbox User" and "Inbox Admin".
+2. Assign licenses: Setup → Company Information → check feature licenses or installed package license count and assign seats at Setup → Installed Packages → Configure (if the package exposes a license page).
+3. Assign permission sets: Setup → Users → Permission Sets → find the package permission sets (e.g., "Inbox User") → Manage Assignments → Add Assignments.
+4. Enable email integration features as needed: Setup → Email → Email Integrations or Setup → Email Integration Settings.
+
+Link: after install, validate common permission guidance in our post on Permission Sets vs Profiles for assignment patterns.
+
+## How to configure OAuth for Gmail (Google Workspace)
+
+Why: Inbox needs delegated access to read and write mail and calendars for logging and sync.
+
+Steps (Google Cloud Console):
+
+1. Create project → OAuth consent screen (Internal or External) → add scopes and test users.
+2. Create Credentials → OAuth 2.0 Client ID → Application type: Web application.
+3. Authorized redirect URIs: add Salesforce auth callback(s). You can copy the Connected App callback after creating the Connected App in Salesforce (see next step) or add common Salesforce domains like https://login.salesforce.com/services/authcallback/.
+4. Scopes to request (minimum set):
+   - openid email profile
+   - https://www.googleapis.com/auth/gmail.modify (email log/update)
+   - https://www.googleapis.com/auth/gmail.send (if sending from Inbox)
+   - https://www.googleapis.com/auth/calendar (calendar sync)
+
+5. In Salesforce create a Connected App: Setup → App Manager → New Connected App. Use the Google Client ID/Secret and enable OAuth settings with the same scopes. Save, then go to App Manager → the connected app → Manage → OAuth policies to set IP relaxations or refresh token policies.
+
+Google and Salesforce docs: see OAuth and connected apps in [Salesforce Developer Docs](https://developer.salesforce.com/docs).
+
+## How to configure OAuth for Outlook / Office 365 (Azure AD)
+
+1. Register an application in Azure Portal → App registrations → New registration.
+2. Redirect URI: Add the Salesforce connected app callback URL (you will enter it into the Salesforce Connected App later).
+3. API permissions to grant (delegated):
+   - Mail.ReadWrite
+   - Calendars.ReadWrite
+   - offline_access
+   - openid profile email
+   - User.Read (optional for profile)
+
+4. Create a client secret in Azure, then create a Connected App in Salesforce (Setup → App Manager → New Connected App) and paste the Azure client ID & secret and requested scopes.
+5. In Azure grant admin consent for the permissions so end users won’t see consent prompts.
+
+Notes: For Outlook on-premises (Exchange Server) Inbox may require a different connector; most customers use Office 365 / Microsoft Graph.
+
+## Which permission sets and Gmail/Exchange scopes are required?
+
+Permission sets (packaged):
+
+- Inbox User (gives UI and basic email logging)
+- Inbox Admin (admin console + global settings)
+
+Assign the user-facing "Inbox User" permission set to every Inbox user. For admin work, give a named admin user the "Inbox Admin" permission set.
+
+OAuth scopes recap:
+
+- Gmail: openid, email, profile, https://www.googleapis.com/auth/gmail.modify, https://www.googleapis.com/auth/gmail.send, https://www.googleapis.com/auth/calendar
+- Microsoft Graph: openid, profile, email, offline_access, Mail.ReadWrite, Calendars.ReadWrite, User.Read
+
+## How to diagnose common install and OAuth failures
+
+Checks (fast list):
+
+- Installed package present: Setup → Installed Packages → confirm "Salesforce Inbox".
+- Permission sets exist: Setup → Permission Sets → look for "Inbox User".
+- License seats: Setup → Installed Packages → Manage Licenses.
+- Connected App visible and active: Setup → App Manager → find your Connected App and check OAuth Policies and refresh token policy.
+- Tokens issued: Setup → App Manager → Connected App → View OAuth Usage (or Setup → Connected Apps OAuth Usage). Look for the user and token expiry/refresh errors.
+- Browser blocking: ensure third-party cookies are allowed for google.com or microsoftonline.com during OAuth flows.
+- Admin consent: for Azure, confirm admin consent granted; for Google, ensure test users are added on OAuth consent screen if app is still in testing.
+
+Common error strings to watch for in logs: "invalid_grant", "consent_required", "invalid_client", or 401 responses from Graph/Gmail APIs.
+
+## Recipe 1 — Auto-log Inbox emails as Tasks on related Opportunities (record-triggered Flow)
+
+Trigger: Record-triggered Flow on EmailMessage (After Save).
+
+Steps:
+
+1. Get Records: Contact where Email = EmailMessage.FromAddress (or use a custom Email-to-Contact mapping table).
+2. Get Records: Opportunity where Id IN (SELECT OpportunityId FROM OpportunityContactRole WHERE ContactId = {!Contact.Id} AND IsClosed = false) — in Flow use Get Records on OpportunityContactRole then Get Records on Opportunity by Id list.
+3. Decision: If Opportunity list not empty.
+4. Create Records: Task (Subject = "Logged Email: " & {!EmailMessage.Subject}, OwnerId = Opportunity.OwnerId, WhatId = Opportunity.Id, WhoId = Contact.Id, Status = "Completed").
+
+Performance note: use collections and update in bulk-aware Flow elements; for orgs with high volume prefer an async Platform Event or Queueable Apex to avoid CPU limits.
+
+## Recipe 2 — Route tracked emails to a queue via Flow
+
+Use case: Sales operations wants tracked (CRM-tracked) emails escalated to an internal review queue.
+
+Trigger: Record-triggered Flow on EmailMessage.
+
+Steps:
+
+1. Decision: EmailMessage.IsTracked (or custom header) is true.
+2. Create Records: Create a custom record Email_Work_Item__c with fields: Subject, From, RelatedId (optional), and OwnerId = queueId (prefix 00G...).
+3. Optional: Post to Chatter or create Case depending on routing rules.
+
+Queue ID: find at Setup → Queues → open queue → copy the Id from the URL (starts with 00G).
+
+## Recipe 3 — Bulk-enable Inbox for a new sales team (Data API or sfdx)
+
+Approach: assign the packaged permission set to a list of users using sfdx or Data Loader to insert PermissionSetAssignment records.
+
+Steps (sfdx + SOQL):
+
+1. Find PermissionSetId:
+
+```sql
+SELECT Id, Name FROM PermissionSet WHERE Name = 'Inbox_User'
+```
+
+2. Prepare CSV assignments.csv with headers: AssigneeId, PermissionSetId
+
+3. Bulk insert:
+
+```bash
+sfdx force:data:bulk:insert -s PermissionSetAssignment -f assignments.csv
+```
+
+Or use Data Loader to insert into PermissionSetAssignment with the same CSV.
+
+Tip: to get user Ids for a role/team, query Users by RoleId or ProfileId and export.
+
+## Named Credential example for calling Microsoft Graph from Apex/Flow
+
+Named Credential using an Auth Provider (metadata simplified):
+
+```xml
+<NamedCredential xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>MicrosoftGraphNC</label>
+  <endpoint>https://graph.microsoft.com/</endpoint>
+  <principalType>NamedUser</principalType>
+  <authenticationProtocol>OAuth</authenticationProtocol>
+  <authProvider>YOUR_AuthProvider_DeveloperName</authProvider>
+</NamedCredential>
+```
+
+Use it in Apex HTTP callouts or in External Services integrations so you don't store secrets in Apex.
+
+## Common mistakes (and how to fix them)
+
+- **Assigning Profiles instead of the packaged permission set.** Fix: Assign the Inbox User permission set from the installed package; profiles don’t include managed-package permissions.
+- **Forgetting admin consent in Azure.** Fix: In Azure Portal click "Grant admin consent" for the app so users won’t see consent errors.
+- **Using the wrong OAuth scopes for Gmail.** Fix: include gmail.modify for logging and calendar scopes for calendar sync; missing scopes produce partial failures.
+- **Testing in production without test users on Google OAuth consent screen.** Fix: add admin test users or publish the app consent if ready.
+- **Hardcoding Queue IDs in Flow without fallback.** Fix: store queue IDs in Custom Metadata and reference them from Flow for portability across orgs.
+
+## FAQ
+
+### How do I tell if Inbox is logging emails or just capturing them with Einstein Activity Capture?
+
+Check EmailMessage records in the org: Inbox logging will create EmailMessage records linked to records; Einstein Activity Capture writes to the Activity timeline but not always EmailMessage objects. Review Setup → Einstein Activity Capture settings if capture is active.
+
+### Where can I find the Inbox package permission set names?
+
+Setup → Permission Sets → filter by the package namespace or search for "Inbox"; names are typically "Inbox User" and "Inbox Admin".
+
+### Can I bulk-revoke Inbox access?
+
+Yes — bulk-delete PermissionSetAssignment records for the permission set (Data Loader or sfdx). Remove license seats in Installed Packages if needed.
+
+### What browser settings commonly break OAuth flows?
+
+Third-party cookie blocking and aggressive tracker blockers. Test in an incognito window with extensions disabled.
+
+### Do I need Named Credentials for Inbox?
+
+Not for end-user Inbox UI, but use Named Credentials for custom automation calling Graph/Gmail APIs so you do not store client secrets in Apex.
+
+For a deeper configuration checklist and additional Flow templates, see the step-by-step guide on Inbox setup and our Permission Sets vs Profiles guide for assignment patterns.
+
+Assign the packaged Inbox permission set to a pilot group, validate OAuth tokens for one Google/Azure test user, and then bulk-assign via sfdx before full rollout.
