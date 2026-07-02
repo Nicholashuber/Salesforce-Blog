@@ -1,0 +1,169 @@
+---
+title: Permission Set Group automation Flow patterns that survive 10k+ active users
+date: 2026-07-02T09:00:00.000Z
+category: Administrator
+thumbnail: permission-set-group-automation-flow-patterns-10k-users.png
+tags:
+  - Flow Builder
+  - Permission Sets
+  - Permission Set Group
+  - Automation
+  - Custom Metadata Types
+  - Platform Events
+  - Apex fallback
+keywords:
+  - Permission Set Group Flow
+  - assign permission set group bulk
+  - automate permission sets salesforce
+  - permission set group best practices
+excerpt: Practical, Flow-first patterns to assign and revoke Permission Set
+  Groups at scale. Covers scheduled batch flows with Platform Events,
+  record-triggered flows with queued handoffs, and a metadata-driven mapping
+  approach for Permission Set Group automation Flow to stay resilient past 10k
+  users.
+---
+
+# Permission Set Group automation Flow patterns that survive 10k+ active users
+
+Short answer: Use Flow-first patterns that split large jobs into many small transactions: (1) scheduled batch Flows that publish Platform Events and let event-triggered flows do assignments, (2) record-triggered Flows that publish a handoff event and a small Apex queueable only when Flow limits are reached, and (3) a Custom Metadata–driven mapping layer so your Flows never hard-code IDs. Use Apex only when you need synchronous cross-object complex logic or exceed async limits.
+
+## How does Permission Set Group automation Flow handle 10k+ active users?
+
+Flows are capable, but single Flow transactions hit limits quickly when you try to create many PermissionSetGroupAssignment records in one go. The reliable approach is to split work into many sub-transactions. You do this by publishing Platform Events or by batching user Ids into collections and handing them off to async processors. Add a mapping layer with Custom Metadata Types so admins change rules without editing Flows or code.
+
+This article assumes the API objects PermissionSetGroup and PermissionSetGroupAssignment are available and that you can create Platform Events and Custom Metadata Types in Setup.
+
+## How to build a scheduled batch Flow using Platform Events (Apex-free)
+
+When you must apply PSG assignments across broad cohorts nightly, use a Scheduled-Triggered Flow to publish Platform Events that fan out small assignment jobs.
+
+1. Setup → Platform Events → New Platform Event
+   - Name: Permission_Set_Group_Assign__e
+   - Fields: UserIds__c (Long Text Area), PermissionSetGroupId__c (Text)
+
+2. Setup → Flows → New Flow → Schedule-Triggered Flow
+   - Start: run daily at off-peak hours
+   - Get Records: Get Users matching your criteria (Active = True, Profile, Role, custom checkbox, etc.)
+   - Decision: Chunk users into groups of N (suggest 200–500 ids per event). Use Flow variables and loop counters.
+   - Create Records (Platform Event): Create Permission_Set_Group_Assign__e records where UserIds__c contains a CSV of the chunk and PermissionSetGroupId__c is the target ID.
+
+3. Create another Flow: Platform Event–Triggered Flow (Permission_Set_Group_Assign__e)
+   - This flow receives a single event (one chunk), parses the UserIds__c into a collection (use Text Template + Assignment operations), and then Create Records → create PermissionSetGroupAssignment records by mapping each AssigneeId to PermissionSetGroupId.
+   - Important: Do not perform per-record Get/Update inside a For Each. Build a collection of PermissionSetGroupAssignment records and Create Records once using the collection.
+
+Why this scales: Platform Events decouple the scheduling transaction from the assignment transactions. Each event-triggered Flow runs in its own transaction and stays under per-transaction limits.
+
+See the Platform Events guide for details on event delivery and replay: https://developer.salesforce.com/docs/atlas.en-us.platform_events.meta/platform_events/platform_events_intro.htm
+
+Internal reference: this pattern pairs well with [Automating Salesforce Record Updates with Scheduled Flows](/salesforce-blog/posts/administrator/automating-salesforce-record-updates-with-scheduled-flows-a-step-by-step-guide-for-admins).
+
+## How to build a record-triggered Flow that hands off heavy work (queueable handoff)
+
+Use this when assignments must happen on user updates (role change, department change). Keep the triggering Flow lightweight and offload bulk work.
+
+1. Build a Record-Triggered Flow on User (after save)
+   - Entry Criteria: the fields that drive PSG assignment changed (e.g., Department, Title)
+   - Immediately: Evaluate Decision and record the target PermissionSetGroupId(s) as text in a Platform Event or custom object row.
+   - Create Platform Event: publish small batches (1–200 user Ids) or a single event containing the user Id and the PSG Id.
+
+2. Create a Platform Event–Triggered Flow that receives the event and creates PermissionSetGroupAssignment records in collection.
+
+Apex fallback (only when Flow cannot meet your requirements): if your org needs complex de-duplication across many objects, publish the same Platform Event but have an Apex trigger or Queueable process it. Example Apex (bulkified, safe):
+
+```apex
+public class PSGAssignmentQueueable implements Queueable {
+    private List<Id> userIds;
+    private Id psgId;
+    public PSGAssignmentQueueable(List<Id> userIds, Id psgId) {
+        this.userIds = userIds;
+        this.psgId = psgId;
+    }
+    public void execute(QueueableContext ctx) {
+        // Filter out existing assignments
+        Set<Id> userSet = new Set<Id>(userIds);
+        List<PermissionSetGroupAssignment> existing = [
+            SELECT AssigneeId FROM PermissionSetGroupAssignment
+            WHERE AssigneeId IN :userSet AND PermissionSetGroupId = :psgId
+        ];
+        Set<Id> already = new Set<Id>();
+        for (PermissionSetGroupAssignment a : existing) already.add(a.AssigneeId);
+
+        List<PermissionSetGroupAssignment> toInsert = new List<PermissionSetGroupAssignment>();
+        for (Id u : userSet) {
+            if (!already.contains(u)) toInsert.add(
+                new PermissionSetGroupAssignment(AssigneeId = u, PermissionSetGroupId = psgId)
+            );
+        }
+        if (!toInsert.isEmpty()) Database.insert(toInsert, false);
+    }
+}
+```
+
+Use this Apex only when you need complex de-duplication, cross-object constraints, or must process >50k assignments per day that Platform Events + Flows cannot reliably meet.
+
+## How to use Custom Metadata Types as a mapping layer (no-code change management)
+
+Stop hard-coding Permission Set Group Ids in Flows. Create a Custom Metadata Type that maps business attributes to PSGs.
+
+1. Setup → Custom Metadata Types → New
+   - Label: PSG Mapping
+   - Fields: Match_Field__c (Text), Match_Value__c (Text), PermissionSetGroupId__c (Text)
+
+2. Populate records for each mapping (e.g., Match_Field = Department, Match_Value = Finance, PermissionSetGroupId = 0PSG...)
+
+3. In your Flow (scheduled or record-triggered), do Get Records → Get PSG Mapping records and filter by Match_Field + Match_Value to determine PermissionSetGroupId dynamically.
+
+Benefits: admins update mappings in Setup → Custom Metadata instead of edits to Flows or code. For performance, cache mappings in the Flow as a single Get Records and reuse the result across your Flow interview.
+
+Internal reference: see our guide to [Boosting Salesforce Performance with Custom Metadata Types](/salesforce-blog/posts/developer/boosting-salesforce-performance-with-custom-metadata-types-a-complete-guide).
+
+## When should you switch from Flow to an Apex-based service layer?
+
+Use Flow when:
+
+- Jobs run on schedule or trigger and can be split into small batches (<500 records per event).
+- Business logic is mapping or straightforward create/delete of PermissionSetGroupAssignment records.
+- Admins must edit mappings without code changes.
+
+Use Apex when:
+
+- You need cross-object transactional guarantees across 2+ objects in the same transaction.
+- You must process extremely high throughput (sustained tens of thousands of assignment changes per day) and need fine-grained retry/error handling.
+- You need complex de-duplication or logic not possible in Flow (e.g., advanced SOQL joins, large aggregate queries, or custom retry strategies).
+
+Decision table:
+
+| Scenario | Use Flow | Use Apex |
+|---|---:|---:|
+| Nightly cohort assignment, admin-editable mappings | ✅ | ❌ |
+| Real-time, low-volume updates (role change) | ✅ | ❌ |
+| Cross-object transactional requirement | ❌ | ✅ |
+| Sustained extreme throughput or complex de-dupe | ❌ | ✅ |
+
+## Common mistakes and how to fix them
+
+- **Trying to create thousands of PSG assignments in one Flow interview.** Break work into chunks and use Platform Events or batch processing.
+- **Hard-coding Permission Set Group IDs in Flows.** Use Custom Metadata Types and a single Get Records to drive mappings.
+- **Publishing very large Platform Event payloads.** Keep events small (200–500 user ids). Large events increase delivery latency and risk failure.
+- **Mixing DML on setup metadata and user records in the same transaction.** Avoid mixed DML issues by separating setup changes from user record changes into different transactions or use async Apex.
+- **Not checking existing PermissionSetGroupAssignment records before insert.** Query existing assignments first and filter to avoid duplicate-insert errors or unnecessary API usage.
+
+## FAQ
+
+### Can I create PermissionSetGroupAssignment with Flow without Apex?
+Yes. Flow can Create Records for PermissionSetGroupAssignment. Use collection Create Records instead of per-record creates to stay efficient.
+
+### How many Platform Events can I publish per 24 hours?
+Platform Events have org-level and edition limits. Consult the Platform Events guide for your org limits: https://developer.salesforce.com/docs/atlas.en-us.platform_events.meta/platform_events/platform_events_limits.htm
+
+### What chunk size should I use when publishing events?
+Start with 200–500 user Ids per event. Test end-to-end in a sandbox and measure execution time, retries, and CPU consumption. Adjust down if you see failures.
+
+### Will scheduled Flows run exactly on time for thousands of events?
+Scheduled Flows publish events on schedule, but platform delivery timing can vary under load. Use off-peak windows and monitor the Event Monitoring metrics.
+
+### How do I handle errors from a Platform Event–triggered Flow?
+Have the event-triggered Flow write error rows to a custom object with the payload and error message. Build a retry Flow or queue an Apex job for failed payloads.
+
+If you need a practical next step, pick one cohort rule and implement it in a sandbox as a Scheduled-Triggered Flow → publish small Platform Events → event-triggered Flow that creates PermissionSetGroupAssignment records; use Custom Metadata for the mapping and test with 1k users.
+
