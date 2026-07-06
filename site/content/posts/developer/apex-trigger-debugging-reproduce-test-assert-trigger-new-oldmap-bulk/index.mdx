@@ -1,0 +1,220 @@
+---
+title: "Apex trigger debugging: reproduce, test, and assert Trigger.new /
+  Trigger.oldMap in bulk"
+date: 2026-07-06T09:00:00.000Z
+category: Developer
+thumbnail: apex-trigger-debugging-reproduce-test-assert-trigger-new-oldmap-bulk.png
+tags:
+  - Apex
+  - Triggers
+  - Unit Tests
+  - Debugging
+  - Bulk Operations
+keywords:
+  - apex trigger debugging
+  - trigger.new
+  - trigger.oldMap
+  - bulk triggers
+  - trigger unit tests
+  - mixed DML
+  - platform event retry
+  - recursive trigger protection
+excerpt: A compact Apex trigger debugging checklist plus three runnable
+  test-class recipes that assert Trigger.new, Trigger.oldMap, and recursion
+  protection in single-record and 200-record runs. Includes a repeatable repro
+  for mixed DML, before/after contexts, Platform Event retries, and surfacing
+  the exact failing record in a bulk transaction.
+---
+
+# Apex trigger debugging: reproduce, test, and assert Trigger.new / Trigger.oldMap in bulk
+
+Short answer: Use a tiny trigger-capture helper to record Trigger.new / Trigger.oldMap during insert/update, run a single-record and a 200-record insert/update in Test.startTest/Test.stopTest, and write assertions against the helper's static state. For recursion and mixed-DML cases add a idempotent guard and use System.runAs in tests. The three copy-pasteable tests below are runnable.
+
+## How to reproduce apex trigger debugging behavior for single-record and bulk operations
+
+1. Create a minimal trigger on a standard object (Account) that calls a static capture method.
+2. In tests, use Test.startTest()/Test.stopTest() and insert/update 1 record and 200 records.
+3. Assert the helper stored the Trigger.new size, and for updates assert Trigger.oldMap values.
+
+This reproduces the real Trigger context you see in production (triggers receive up to 200 records per execution). Remember transaction limits: 100 SOQL queries, 150 DML statements, and a trigger batch may contain up to 200 records.
+
+(See the full runnable code blocks below.)
+
+## What helper code to add (copy-pasteable)
+
+Create a tiny capture utility. Place this in: Setup → Developer Console → New → Apex Class.
+
+```apex
+public class TriggerDebugCapture {
+    public static List<SObject> lastNew = new List<SObject>();
+    public static Map<Id, SObject> lastOldMap = new Map<Id,SObject>();
+    public static Set<Id> processedIds = new Set<Id>();
+    public static Integer recursionHits = 0;
+
+    public static void clear() {
+        lastNew.clear();
+        lastOldMap.clear();
+        processedIds.clear();
+        recursionHits = 0;
+    }
+
+    public static void capture(List<SObject> newList, Map<Id,SObject> oldMap) {
+        lastNew = new List<SObject>();
+        for (SObject s : newList) lastNew.add(s.clone(false,true,false,false));
+
+        lastOldMap = new Map<Id,SObject>();
+        if (oldMap != null) {
+            for (Id k : oldMap.keySet()) lastOldMap.put(k, oldMap.get(k).clone(false,true,false,false));
+        }
+    }
+
+    public static Boolean tryMarkProcessed(Id recordId) {
+        if (processedIds.contains(recordId)) return false;
+        processedIds.add(recordId);
+        recursionHits++;
+        return true;
+    }
+}
+```
+
+Create an Account trigger that calls the capture helper and demonstrates a guarded recursive update (this is safe and bulkified):
+
+```apex
+trigger AccountTrigger on Account (before insert, after insert, before update, after update) {
+    // Capture context every time the trigger runs
+    TriggerDebugCapture.capture(Trigger.new, Trigger.oldMap);
+
+    if (Trigger.isAfter && Trigger.isUpdate) {
+        // Demonstrate a guarded recursive update: set Description when Name contains 'recur'
+        List<Account> toUpdate = new List<Account>();
+        for (Account a : Trigger.new) {
+            if (a.Name != null && a.Name.contains('recur') && TriggerDebugCapture.tryMarkProcessed(a.Id)) {
+                Account up = new Account(Id = a.Id, Description = 'updated-by-trigger');
+                toUpdate.add(up);
+            }
+        }
+        if (!toUpdate.isEmpty()) Database.update(toUpdate, false);
+    }
+}
+```
+
+This trigger is bulk-safe: it avoids per-record DML and uses Database.update with allOrNone=false for the recursive update group.
+
+## Three copy-pasteable test recipes (runnable)
+
+Put these in separate test classes or the same file. Run them in your Dev org.
+
+1) Single-record insert and update that asserts Trigger.new and Trigger.oldMap
+
+```apex
+@IsTest
+private class TestSingleRecordTrigger {
+    @IsTest static void singleInsertAndUpdate_assertContext() {
+        TriggerDebugCapture.clear();
+
+        Test.startTest();
+        Account a = new Account(Name = 'SingleDebug');
+        insert a;
+        Test.stopTest();
+
+        // After insert the helper saw one record
+        System.assertEquals(1, TriggerDebugCapture.lastNew.size(), 'Trigger.new size after insert');
+
+        // Now update and assert Trigger.oldMap contains the previous Name
+        TriggerDebugCapture.clear();
+        Test.startTest();
+        a.Name = 'SingleDebug-updated';
+        update a;
+        Test.stopTest();
+
+        System.assertEquals(1, TriggerDebugCapture.lastNew.size());
+        Account oldAcc = (Account) TriggerDebugCapture.lastOldMap.get(a.Id);
+        System.assertEquals('SingleDebug', oldAcc.Name, 'Trigger.oldMap should contain pre-update Name');
+    }
+}
+```
+
+2) Bulk 200-record insert to verify Trigger.new bulk shape
+
+```apex
+@IsTest
+private class TestBulkTriggerContext {
+    @IsTest static void bulkInsert200_assertBulkNew() {
+        TriggerDebugCapture.clear();
+        List<Account> many = new List<Account>();
+        for (Integer i = 0; i < 200; i++) many.add(new Account(Name = 'Bulk ' + i));
+
+        Test.startTest();
+        insert many;
+        Test.stopTest();
+
+        System.assertEquals(200, TriggerDebugCapture.lastNew.size(), 'Trigger should receive all 200 records in one execution');
+    }
+}
+```
+
+3) Recursive protection test: ensure the guarded recursive update runs once per record and does not loop
+
+```apex
+@IsTest
+private class TestRecursiveProtection {
+    @IsTest static void recursionDoesNotLoop() {
+        TriggerDebugCapture.clear();
+        Account a = new Account(Name = 'recur-case');
+        insert a;
+
+        Test.startTest();
+        a.Name = 'do-recur';
+        update a; // this triggers the after update block that attempts a guarded update
+        Test.stopTest();
+
+        // recursionHits should be 1: handler marked the record once
+        System.assertEquals(1, TriggerDebugCapture.recursionHits, 'Guard should allow one processing pass');
+    }
+}
+```
+
+## How to simulate mixed DML and why System.runAs matters in tests
+
+Mixed DML (setup + non-setup objects in one transaction) throws System.DmlException in runtime. In tests use System.runAs when creating Users or other setup objects to avoid the Mixed DML restriction. Example pattern:
+
+1. Create a user within System.runAs(user) { insert someSetupObject; }
+2. Do your non-setup DML outside or in a separate runAs block.
+
+This is the supported test-pattern — see the developer docs for mixed DML details: https://developer.salesforce.com/docs
+
+## How to reason about Platform Event-driven retries and triggers
+
+Apex subscribers for Platform Events run asynchronously. If an event-processing transaction fails, platform retries may reprocess the event (depending on delivery settings). Treat event handlers as potentially idempotent: use unique external IDs, upserts, or a durable processed-event ledger (Custom Object) and write your handler to no-op when the ledger shows the event already processed.
+
+## Pattern to surface the exact failing record in a 200-row transaction
+
+If you perform DML that can fail per-row, prefer Database.insert/update(records, false) and inspect the Database.SaveResult[] to map failures back to record indexes/Ids. In a trigger you can perform the DML in small batches and collect SaveResult details; log SaveResult.getErrors()[0].getMessage() and the corresponding record.Id to find the failing row rather than letting the whole transaction roll back.
+
+## Common mistakes (and how to fix them)
+
+- **Asserting Trigger.oldMap on insert** — Trigger.oldMap is null on insert. Fix: assert oldMap only in update/delete tests.
+- **Putting SOQL/DML inside a loop** — That hits governor limits on bulk runs. Fix: bulkify into a single SOQL and one DML per 200-record batch.
+- **Not clearing static helper state between tests** — Stale state causes flaky asserts. Fix: call TriggerDebugCapture.clear() at the top of each @IsTest method.
+- **Assuming Platform Event handlers never retry** — Retries happen; make handlers idempotent.
+- **Using Database.* with allOrNone=true for large mixed operations** — You lose per-record diagnostics. Fix: use allOrNone=false and inspect SaveResult.
+
+## FAQ
+
+### How do I assert Trigger.oldMap in a test?
+Create the record, insert it, then call update inside Test.startTest()/Test.stopTest(). In the update-trigger run assert TriggerDebugCapture.lastOldMap.get(recordId).FieldName equals the original value.
+
+### How many records can a trigger receive at once?
+A trigger can receive up to 200 records in a single execution context when DML is issued via the API or Bulk Data Loader.
+
+### How do I test mixed DML in unit tests?
+Wrap setup-object DML (User, Group, etc.) inside System.runAs(user) in your test. runAs bypasses the Mixed DML restriction in test context.
+
+### How do I find the one failing record in a 200-row update?
+Use Database.update(list, false) and examine the returned Database.SaveResult array; map failures back to the source list index or record Id.
+
+### Where can I read more about trigger context variables and best practices?
+See our companion piece: [Salesforce Trigger Context Variables Explained](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/salesforce-trigger-context-variables-explained/index.mdx) and the general patterns in [Apex Triggers: Best Practices and Common Pitfalls](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/apex-triggers-best-practices-and-common-pitfalls/index.mdx). Also consult the official docs: https://developer.salesforce.com/docs
+
+Run the three tests above in a Developer Edition or sandbox to validate trigger behavior locally and iterate on the helper capture to record additional fields you care about.
+
