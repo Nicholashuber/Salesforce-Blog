@@ -1,0 +1,222 @@
+---
+title: "SOQL pagination: OFFSET vs cursor vs keyset (LWC & Apex)"
+date: 2026-07-09T09:00:00.000Z
+category: Developer
+thumbnail: soql-pagination-offset-cursor-keyset-lwc-apex.png
+tags:
+  - SOQL
+  - Apex
+  - LWC
+  - Performance
+  - Developer
+keywords:
+  - soql pagination
+  - OFFSET pagination salesforce
+  - keyset pagination apex
+  - cursor pagination salesforce
+  - LWC pagination
+excerpt: Compare SOQL pagination patterns—OFFSET, LIMIT+OFFSET, keyset (WHERE Id
+  > :lastId), and server-side cursors—and pick the right one for your table by
+  Monday. This guide gives copy-pasteable Apex and LWC examples, governor-limit
+  notes, and a reusable Custom Metadata page-size pattern so you can implement
+  safe, performant pagination fast.
+---
+
+# SOQL pagination: OFFSET vs cursor vs keyset (LWC & Apex)
+
+Short answer
+
+For small result sets and shallow pages use LIMIT + OFFSET. For large tables or deep paging use keyset pagination (WHERE sortField > :lastValue OR (sortField = :lastValue AND Id > :lastId)). For exports or background processing use server-side cursors / Database.getQueryLocator (Batchable) or the API query/queryMore flow. One-line rule: OFFSET for convenience, keyset for scale, server cursors for bulk exports.
+
+## How does OFFSET (LIMIT + OFFSET) pagination work and when is it OK?
+
+OFFSET skips N rows then returns the next LIMIT rows. It's easy to implement and maps directly to page numbers.
+
+When to use it
+
+- Small tables (< ~2,000 row offset) or admin pages where the UX expects random-access page numbers.
+- When simplicity and quick implementation win over raw performance.
+
+Pitfalls
+
+- OFFSET supports offsets only up to 2,000 rows (Salesforce-enforced). For deep pages you will hit an exception or very slow queries. See the official docs: https://developer.salesforce.com/docs
+- OFFSET becomes slower as offset increases because the platform still scans rows to skip them.
+- Concurrent inserts/deletes can cause duplicates/missing rows between page refreshes.
+
+Apex example (simple OFFSET):
+
+```apex
+public with sharing class AccountPaginator {
+  @AuraEnabled(cacheable=true)
+  public static List<Account> fetchWithOffset(Integer pageSize, Integer pageNumber) {
+    Integer offset = Math.max(0, (pageNumber - 1) * pageSize);
+    // ❗ OFFSET cannot exceed 2000 across all rows. Protect callers before calling with large offsets.
+    return [SELECT Id, Name, Industry, OwnerId
+            FROM Account
+            ORDER BY Name
+            LIMIT :pageSize
+            OFFSET :offset];
+  }
+}
+```
+
+LWC usage (imperative) calling the Apex method above:
+
+```javascript
+// js
+import fetchWithOffset from '@salesforce/apex/AccountPaginator.fetchWithOffset';
+
+async function loadPage(pageSize, pageNumber) {
+  this.records = await fetchWithOffset({ pageSize, pageNumber });
+}
+```
+
+## What is keyset pagination and why is it faster for large datasets?
+
+Keyset pagination (cursor-based) uses the last row's sort key(s) to request the next page. It avoids OFFSET scanning and uses index seeks when queries are selective.
+
+When to use it
+
+- Large tables or deep paging where performance must be predictable.
+- When results must remain consistent as new rows are added (stable cursor ordering required).
+
+Rules
+
+- Order by an indexed column (LastModifiedDate, SystemModstamp, an indexed custom field) and include Id as a tiebreaker.
+- Save the last page's sort values (e.g., lastName and lastId) and send them with the next request.
+
+A bulk-safe Apex example (keyset using LastName then Id):
+
+```apex
+public with sharing class ContactPaginator {
+  @AuraEnabled(cacheable=true)
+  public static List<Contact> fetchKeyset(Integer pageSize, String lastLastName, Id lastId) {
+    if (String.isBlank(lastLastName)) {
+      return [SELECT Id, FirstName, LastName, Email
+              FROM Contact
+              ORDER BY LastName, Id
+              LIMIT :pageSize];
+    }
+
+    return [SELECT Id, FirstName, LastName, Email
+            FROM Contact
+            WHERE LastName > :lastLastName
+               OR (LastName = :lastLastName AND Id > :lastId)
+            ORDER BY LastName, Id
+            LIMIT :pageSize];
+  }
+}
+```
+
+LWC @wire example using keyset pagination (cacheable=true works if inputs are immutable):
+
+```javascript
+// js
+import { LightningElement, wire, track } from 'lwc';
+import fetchKeyset from '@salesforce/apex/ContactPaginator.fetchKeyset';
+
+export default class ContactList extends LightningElement {
+  @track records = [];
+  pageSize = 25;
+  lastLastName = null;
+  lastId = null;
+
+  @wire(fetchKeyset, { pageSize: '$pageSize', lastLastName: '$lastLastName', lastId: '$lastId' })
+  wiredContacts({ error, data }) {
+    if (data) this.records = data;
+  }
+
+  handleNext() {
+    const last = this.records[this.records.length - 1];
+    this.lastLastName = last.LastName;
+    this.lastId = last.Id;
+  }
+}
+```
+
+Notes
+
+- Keyset yields consistent performance and avoids the OFFSET 2000 limit.
+- Complex multi-column sorts require the same multi-column WHERE progression for correctness.
+
+## What are server-side cursors (queryMore / QueryLocator) and when to use them?
+
+Server-side cursors appear in the SOAP/REST API as query/queryMore and in Apex via Database.getQueryLocator (used by Batchable). Use them for large exports or background jobs that need to process many records without loading everything into a single transaction.
+
+When to use it
+
+- Exporting or processing >50,000 rows (use Batchable + QueryLocator). Database.getQueryLocator is designed for large data sets in asynchronous contexts.
+- When the UI doesn't need random-access pages but needs a complete streaming export.
+
+A simple Batchable using getQueryLocator:
+
+```apex
+public class AccountExportBatch implements Database.Batchable<sObject> {
+  public Database.QueryLocator start(Database.BatchableContext bc) {
+    return Database.getQueryLocator([
+      SELECT Id, Name, Industry FROM Account WHERE Industry != null ORDER BY Name
+    ]);
+  }
+  public void execute(Database.BatchableContext bc, List<sObject> scope) {
+    // process scope
+  }
+  public void finish(Database.BatchableContext bc) {}
+}
+```
+
+Limitations
+
+- You can’t directly expose a QueryLocator to LWC. Instead, run the batch/queueable and persist page results to a temporary object or return a stable cursor token that your Apex service understands.
+- The REST API query/queryMore flow can be used by integrations that maintain the server-side cursor between calls—see https://developer.salesforce.com/docs
+
+## How to make page size configurable with Custom Metadata (reusable cursor pattern)
+
+Create Custom Metadata Type Pagination_Settings__mdt with a field Page_Size__c (Number) and a DeveloperName of Default. Read it in Apex so admins can change page size without deployments.
+
+```apex
+public with sharing class PaginationConfig {
+  public static Integer getPageSize() {
+    // Pagination_Settings__mdt is the Custom Metadata type API name
+    Pagination_Settings__mdt m = Pagination_Settings__mdt.getAll().get('Default');
+    if (m == null || m.Page_Size__c == null) return 25;
+    return Integer.valueOf(m.Page_Size__c);
+  }
+}
+```
+
+Use PaginationConfig.getPageSize() in your fetch methods to centralize page-size control.
+
+## Performance & governor-limit notes
+
+- SOQL row governor: a synchronous Apex transaction may retrieve up to 50,000 rows via SOQL. For larger volumes use Batchable / QueryLocator. See https://developer.salesforce.com/docs for details.
+- OFFSET is limited to offsets of 2,000 rows and gets slower as offset grows. Don't use it for deep pagination.
+- Keyset pagination performs best when ORDER BY uses an indexed column and includes Id for determinism.
+- cacheable=true on @AuraEnabled methods allows Lightning Data Service caching but only for purely read-only calls with immutably-serializable params.
+
+## Common mistakes (and how to fix them)
+
+- **Using OFFSET for deep pages (>2000)** — switch to keyset pagination or an async QueryLocator-based process.
+- **Ordering by a non-indexed field** — add an index (custom or skinny table) or pick an indexed sort column to keep queries selective.
+- **Relying on page number for consistent results** — data changes cause shifted rows; use keyset cursors for stability.
+- **Exposing QueryLocator directly to UI** — instead, run an async job that writes results to a temporary object or provide a server-side token the UI can call.
+- **Not limiting pageSize** — cap page size (e.g., from Custom Metadata) to avoid large heaps and long CPU time.
+
+## FAQ
+
+### Can I use OFFSET with more than 2000 rows?
+No. OFFSET is limited by platform constraints; for deeper pagination use keyset pagination or an async approach like QueryLocator.
+
+### Will keyset pagination work with multi-column sorts?
+Yes, but you must implement the lexicographic WHERE progression (primary > lastPrimary OR (primary = lastPrimary AND secondary > lastSecondary), etc.) and include Id as the final tiebreaker.
+
+### Can LWC call queryMore on the REST API directly?
+Technically possible from a middleware or named credential integration, but not recommended from client-side LWC. Prefer an Apex controller that manages server-side cursors or returns keyset pages.
+
+### How big should pageSize be?
+Keep page sizes modest (10–100). Use Custom Metadata to tune for your users; bigger pages increase CPU and heap usage.
+
+### Where can I read more about SOQL performance and limits?
+See the Salesforce Developer Docs: https://developer.salesforce.com/docs and our posts on [Optimizing SOQL Queries for Performance in Apex](/posts/developer/optimizing-soql-queries-for-performance-in-apex) and [Mastering SOQL in Salesforce](/posts/developer/mastering-soql-in-salesforce-best-practices-and-advanced-query-techniques) for deeper optimization patterns.
+
+Implement one of these patterns this afternoon: if your table is small, implement OFFSET for quick paging; if you anticipate scale, implement keyset pagination and a Custom Metadata page-size control so you can change behavior without a release.
+
