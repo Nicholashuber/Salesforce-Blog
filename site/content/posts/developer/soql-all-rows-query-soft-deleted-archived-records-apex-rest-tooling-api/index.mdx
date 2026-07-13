@@ -1,0 +1,202 @@
+---
+title: "SOQL ALL ROWS: query soft-deleted and archived records safely from Apex,
+  REST and the Tooling API"
+date: 2026-07-13T09:00:00.000Z
+category: Developer
+thumbnail: soql-all-rows-query-soft-deleted-archived-records-apex-rest-tooling-api.png
+tags:
+  - SOQL
+  - Apex
+  - REST API
+  - Tooling API
+  - Data Recovery
+  - Batch Apex
+  - Security
+keywords:
+  - SOQL ALL ROWS
+  - query deleted records Salesforce
+  - undelete Apex
+  - Database.emptyRecycleBin
+  - Tooling API ALL ROWS
+  - REST API ALL ROWS
+  - Batch Apex deleted records
+excerpt: SOQL ALL ROWS returns soft-deleted (recycle‑bin) and archived records
+  when you need them. This post shows when to use ALL ROWS, how it behaves in
+  Apex vs the REST and Tooling APIs, security/FLS implications, recovery
+  examples, performance notes, and a Batch Apex rollback pattern to restore or
+  permanently purge large result sets.
+---
+
+# SOQL ALL ROWS: query soft-deleted and archived records safely from Apex, REST and the Tooling API
+
+Short answer
+
+SOQL ALL ROWS tells Salesforce to include soft‑deleted (recycle‑bin) records and archived activity rows in your query results. Use ALL ROWS when you need to examine or restore deleted records (IsDeleted = true) or query archived Activities; be mindful that record visibility, FLS/CRUD, and API-specific limits differ between Apex, the REST API, and the Tooling API.
+
+## What is SOQL ALL ROWS and when should you use it?
+
+ALL ROWS is a SOQL query modifier that includes recycle‑bin (soft‑deleted) and archived rows in the result set. Typical uses:
+
+- Recover recently deleted records (query with IsDeleted = true → undelete in Apex).  
+- Audit who deleted what (join to audit fields or query LastModifiedBy / LastReferenced).  
+- Inspect archived Tasks/Events (Activities that are no longer returned by normal queries).  
+
+Do not add ALL ROWS to every query. Only use it when you explicitly need deleted or archived rows because the result set will grow and can include records most users should not see.
+
+Reference: Salesforce SOQL documentation and Query All Rows behavior on the Developer Docs: https://developer.salesforce.com/docs
+
+## How does ALL ROWS behave differently in Apex, REST and the Tooling API?
+
+- Apex (synchronous/transactional): Apex SOQL supports ALL ROWS in inline queries and Database.query. Apex runs with the running user’s permissions for record visibility; however Apex does not enforce FLS/CRUD automatically — you must enforce field‑level and object CRUD checks yourself when exposing results. Use Database.getQueryLocator with ALL ROWS in Batch Apex to iterate large sets.
+
+- REST API (/query endpoint): The REST API honors the calling user’s CRUD/FLS and sharing. A REST query with ALL ROWS returns deleted records the user is allowed to see. You must URL‑encode the query (see example below).
+
+- Tooling API (/tooling/query): Tooling API supports ALL ROWS for tooling objects. Visibility is based on the calling user and the tooling object's own access rules. Tooling API queries can return metadata & deleted tooling rows that are not visible via normal data APIs.
+
+Key difference: Apex will execute code in your org context (so you must enforce FLS/CRUD explicitly) while REST and Tooling API restrict returned fields and records to the caller's permissions.
+
+## How to query deleted or archived records: examples
+
+Apex — simple query and undelete
+
+```apex
+// Apex: find deleted Accounts and undelete them (bulkified)
+List<Account> deletedAccounts = [SELECT Id, Name FROM Account WHERE IsDeleted = true ALL ROWS];
+if (!deletedAccounts.isEmpty()) {
+    // enforce object/field permissions before exposing
+    // Undelete is a DML statement
+    undelete deletedAccounts;
+}
+```
+
+Apex — Batch Apex pattern (QueryLocator) for large sets
+
+```apex
+global class RecoverDeletedAccountsBatch implements Database.Batchable<sObject>, Database.BatchableContext {
+    global Database.QueryLocator start(Database.BatchableContext bc) {
+        // QueryLocator supports very large result sets
+        return Database.getQueryLocator('SELECT Id, Name FROM Account WHERE IsDeleted = true ALL ROWS');
+    }
+
+    global void execute(Database.BatchableContext bc, List<sObject> scope) {
+        // scope contains Account sObjects; recover (undelete) or log
+        try {
+            undelete scope; // ❗ ensure proper sharing/FLS checks earlier if exposing to UI
+        } catch (DmlException e) {
+            // handle partial failure: use Database.undelete with allOrNone=false in real jobs
+        }
+    }
+
+    global void finish(Database.BatchableContext bc) {
+        // post-processing
+    }
+}
+```
+
+REST API example (URL‑encoded query)
+
+```
+GET /services/data/v56.0/query?q=SELECT+Id,+Name+FROM+Account+WHERE+IsDeleted+=+true+ALL+ROWS
+Authorization: Bearer <access_token>
+```
+
+Tooling API example (query tooling objects)
+
+```
+GET /services/data/v56.0/tooling/query/?q=SELECT+Id,+Name+FROM+ApexClass+WHERE+Status+='Deleted'+ALL+ROWS
+```
+
+## Security, sharing and FLS implications you must know
+
+- Record visibility: ALL ROWS does not bypass sharing. The query will only return records the running user can see (or that the Apex context allows). Users with Modify All Data or an admin profile will see more deleted records.
+
+- FLS / CRUD: Apex does not enforce field‑level security. If you expose query results through Lightning or an API, call
+
+```apex
+if (!Schema.sObjectType.Account.fields.Name.isAccessible()) {
+    // remove or mask field
+}
+```
+
+or use with sharing / explicit checks before returning fields.
+
+- Tooling & metadata: Tooling API returns tooling objects and their deleted rows separately; don’t assume data API behavior equals tooling API behavior for metadata records.
+
+- Auditing / compliance: Deleted records may still have attachments or related records; consider joining or querying related objects with ALL ROWS carefully.
+
+## Performance and governor‑limit considerations
+
+- ALL ROWS can dramatically increase result size. Add selective filters (OwnerId, CreatedDate, IsDeleted) and indexes where possible.
+
+- Batch Apex QueryLocator can return up to tens of millions of rows (see [Batch Apex QueryLocator limits](https://developer.salesforce.com/docs) on Developer Docs). Use Database.getQueryLocator('SELECT ... ALL ROWS').
+
+- Avoid fetching all fields. SELECT Id plus the fields you need — pulling large text/blob fields for deleted rows is often unnecessary and slow.
+
+- REST queries return up to 2000 rows per call (with nextRecordsUrl for pagination). For large recoveries use Batch Apex or Bulk API to avoid paging logic.
+
+- For permanent deletion of many records, Database.emptyRecycleBin accepts a list of sObject Ids to hard‑delete from Apex. Use batching to stay under DML limits.
+
+## Short rollback / purge pattern: Batch Apex to permanently delete or restore
+
+Use Batch Apex with ALL ROWS in start(), then in execute() either call undelete for restores or Database.emptyRecycleBin for permanent purge.
+
+```apex
+global class PurgeDeletedAccountsBatch implements Database.Batchable<sObject> {
+    global Database.QueryLocator start(Database.BatchableContext bc) {
+        return Database.getQueryLocator('SELECT Id FROM Account WHERE IsDeleted = true ALL ROWS');
+    }
+
+    global void execute(Database.BatchableContext bc, List<Account> scope) {
+        List<Id> ids = new List<Id>();
+        for (Account a : scope) ids.add(a.Id);
+        // Hard delete (permanently remove from recycle bin)
+        try {
+            Database.emptyRecycleBin(ids);
+        } catch (Exception e) {
+            // log and handle partial failures
+        }
+    }
+
+    global void finish(Database.BatchableContext bc) {}
+}
+```
+
+Notes:
+- Use Database.emptyRecycleBin to hard‑delete. Do not call delete on an IsDeleted record — use undelete then delete if you need to process business logic before hard delete.  
+- For large volumes, monitor asynchronous job limits and split batches to respect DML limits.
+
+## When NOT to use ALL ROWS
+
+- Don’t use ALL ROWS in UI list views or normal service code where deleted records are irrelevant.  
+- Don’t use it without owner/age filters when scanning sensitive objects (Contract, Case) — you may inadvertently expose deleted confidential records.  
+- Don’t replace selective filters (indexed fields) with ALL ROWS; performance will suffer.
+
+## Common mistakes (and how to fix them)
+
+- **Running ALL ROWS without permission checks** — Enforce CRUD/FLS in Apex before exposing fields; use Schema.sObjectType.Field.isAccessible().
+- **Expecting ALL ROWS to bypass sharing** — It doesn’t; test as a non‑admin user to confirm what the query returns.
+- **Paging large ALL ROWS results with REST only** — For bulk restore/purge, use Batch Apex or the Bulk API; REST paging is slow and error‑prone for millions of rows.
+- **Hard deleting by calling delete on an already IsDeleted record** — Use Database.emptyRecycleBin(ids) to permanently remove items, or undelete then delete if you need trigger logic.
+- **Selecting all fields on deleted records** — Fetch only required fields; large text/blob fields increase CPU time and heap usage.
+
+## FAQ
+
+### How do I query soft‑deleted records in SOQL?
+Use ALL ROWS with an IsDeleted filter: SELECT Id, Name FROM Account WHERE IsDeleted = true ALL ROWS.
+
+### Can I undelete records from Apex?
+Yes. Use the undelete DML statement on sObjects returned by a query (undelete myList). For large sets use Batch Apex.
+
+### Does ALL ROWS bypass sharing or FLS?
+ALL ROWS does not bypass sharing. Apex does not enforce FLS/CRUD automatically; you must check those in Apex. REST and Tooling APIs enforce the caller’s permissions.
+
+### Can I permanently delete (hard delete) records in Apex?
+Yes. Use Database.emptyRecycleBin(List<Id>) to remove soft‑deleted records permanently. For very large sets use Batch Apex to stay within DML limits.
+
+### Does ALL ROWS work with Bulk API?
+Use Bulk API queryAll or query with the queryAll option to include deleted/archived rows; Bulk APIs have their own parameters — prefer Batch Apex when you need Apex logic.
+
+Select a practical next step: if you need to recover or purge more than a few hundred deleted records, scaffold a small Batch Apex job using Database.getQueryLocator('... ALL ROWS') and test in a sandbox.
+
+Related reading: see Optimizing SOQL Queries for Performance in Apex and Mastering SOQL: Salesforce Object Query Language Explained for tips on indexing and QueryLocator usage.
+
