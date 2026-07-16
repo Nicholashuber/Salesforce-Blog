@@ -1,0 +1,197 @@
+---
+title: "Trigger context variables cheat sheet: Apex trigger quick reference"
+date: 2026-07-16T09:00:00.000Z
+category: Developer
+thumbnail: trigger-context-variables-cheat-sheet.png
+tags:
+  - Apex
+  - Triggers
+  - Developer
+  - Best practices
+  - Governor limits
+keywords:
+  - trigger context variables cheat sheet
+  - apex trigger context variables
+  - context variables in triggers
+  - Trigger.new Trigger.old Trigger.oldMap
+  - Salesforce trigger cheat sheet
+excerpt: A compact, copy‑pasteable trigger context variables cheat sheet for
+  Apex. Map each variable to when it’s available, the common gotcha, a one‑line
+  fix, and tiny bulk‑safe code snippets for before insert, after update,
+  undelete, mixed DML, and recursive protection.
+---
+
+# Trigger context variables cheat sheet: Apex trigger quick reference
+
+Short answer: This cheat sheet maps each common Apex trigger context variable to when it’s available, the usual gotcha, a one‑line fix, and tiny bulk‑safe code snippets for the unusual cases (before insert, after update, undelete, mixed DML, recursive protection). Keep this page open when you edit triggers — it’s meant to be read in 60 seconds and used immediately.
+
+## What are the trigger context variables you must know?
+
+| Variable | When available | Common gotcha | 1‑line fix + tiny snippet (bulk‑safe) |
+|---|---:|---|---|
+| Trigger.isBefore / isAfter | Always | Assuming Id is present in before trigger | Fix: Don’t reference record Id in before insert; set fields instead. ```apex
+// before insert: set fields, no DML
+for (Account a : Trigger.new) a.Industry = 'Tech';
+``` |
+| Trigger.isInsert / isUpdate / isDelete / isUndelete | Always | Using Trigger.old on insert or Trigger.new on delete | Fix: Check the right side: use Trigger.new on insert, Trigger.old on delete. ```apex
+if (Trigger.isInsert) handleInsert(Trigger.new);
+if (Trigger.isDelete) handleDelete(Trigger.old);
+``` |
+| Trigger.new | Insert/Update/Undelete (read/write for before) | Modifying Trigger.new in after triggers has no effect | Fix: Modify values only in before triggers. ```apex
+if (Trigger.isBefore && Trigger.isInsert) {
+  for (Contact c : Trigger.new) c.FirstName = c.FirstName == null ? 'Unknown' : c.FirstName;
+}
+``` |
+| Trigger.old | Update/Delete (read only) | Trying to DML on Trigger.old records or assuming it's populated on insert | Fix: Use Trigger.old only for reads/compare. ```apex
+if (Trigger.isUpdate) {
+  for (Contact cOld : Trigger.old) {
+    Contact cNew = Trigger.newMap.get(cOld.Id);
+    // compare fields
+  }
+}
+``` |
+| Trigger.newMap / Trigger.oldMap | Update/Delete/Undelete/Insert? (newMap not on delete-only; oldMap not on insert-only) | NullPointer when accessing map for operation type where it isn't provided | Fix: Guard access with Trigger.isUpdate / isDelete or null check. ```apex
+if (Trigger.isUpdate) {
+  Contact newC = Trigger.newMap.get(someId);
+}
+``` |
+| Trigger.size | Always | Assuming it equals Trigger.new.size in delete | Fix: Use Trigger.size for total number of records in context; use Trigger.new/old size per operation. ```apex
+Integer n = Trigger.size;
+``` |
+
+(Expanded explanations are in the long form: [Salesforce Trigger Context Variables Explained](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/salesforce-trigger-context-variables-explained/index.mdx).)
+
+## How to use Trigger.new vs Trigger.old safely?
+
+H3: Before insert — set fields, avoid Id reliance
+
+- Problem: You attempted to reference record Id in before insert. That Id is null until commit.
+- Fix: Set fields on Trigger.new and let the platform assign Ids.
+
+```apex
+// ❌ DO NOT do this
+Id maybeId = Trigger.new[0].Id; // null on before insert
+
+// ✅ Bulk-safe before insert pattern
+if (Trigger.isBefore && Trigger.isInsert) {
+  for (Account a : Trigger.new) {
+    if (a.Name != null && a.OwnerId == null) a.OwnerId = UserInfo.getUserId();
+  }
+}
+// Governor limits: no DML/SOQL here (safe).
+```
+
+H3: After update — compare old and new efficiently
+
+- Problem: Updating every record in an after update without checking for change causes unnecessary DML and recursion.
+- Fix: Use Trigger.oldMap to compare, build a collection, then one bulk DML.
+
+```apex
+if (Trigger.isAfter && Trigger.isUpdate) {
+  List<Case> toUpdate = new List<Case>();
+  for (Case cNew : Trigger.new) {
+    Case cOld = Trigger.oldMap.get(cNew.Id);
+    if (cNew.Priority != cOld.Priority) {
+      cNew.OwnerId = someQueueOrOwnerId(); // prepare update
+      toUpdate.add(new Case(Id = cNew.Id, OwnerId = cNew.OwnerId));
+    }
+  }
+  if (!toUpdate.isEmpty()) update toUpdate; // DML rows count applies (150 rows per transaction)
+}
+// Governor limits: DML rows 150, total DML statements 150, CPU time applies.
+```
+
+## How to handle special cases: undelete, mixed DML, and recursive triggers?
+
+H3: Undelete — know when Trigger.isUndelete fires
+
+- Trigger.isUndelete fires only for sObject undelete operations (Recycle Bin restore). Use Trigger.new to access recovered records.
+
+```apex
+if (Trigger.isUndelete) {
+  for (Account a : Trigger.new) {
+    // run recalculation or re-attach related records
+  }
+}
+```
+
+H3: Mixed DML — setup objects vs non‑setup objects
+
+- Problem: Doing DML on User, Group, or other setup objects and on Account/Contact in the same transaction throws Mixed DML error.
+- Fix: Move setup-object DML to async (Queueable/@future). Example Queueable:
+
+```apex
+public class DoSetupDmlQueueable implements Queueable {
+  private List<User> users;
+  public DoSetupDmlQueueable(List<User> users){ this.users = users; }
+  public void execute(QueueableContext ctx){ update users; }
+}
+
+// caller inside trigger context
+System.enqueueJob(new DoSetupDmlQueueable(usersToUpdate));
+// Governor limits: enqueued jobs per 24 h and synchronous limits apply; this avoids mixed DML exception.
+```
+
+H3: Recursive protection — stop double runs
+
+- Problem: A trigger causes updates that re-fire the same trigger and loop.
+- Fix: Add a static Boolean or a static Set<Id> in a handler class to short‑circuit.
+
+```apex
+public class TriggerGuard {
+  public static Set<Id> processed = new Set<Id>();
+}
+
+if (Trigger.isBefore && Trigger.isUpdate) {
+  List<Account> doUpdate = new List<Account>();
+  for (Account a : Trigger.new) {
+    if (!TriggerGuard.processed.contains(a.Id)) {
+      // mark and do work
+      TriggerGuard.processed.add(a.Id);
+      // prepare update (or modify Trigger.new in before)
+    }
+  }
+}
+// Governor limits: static variables persist only for transaction; use sparingly.
+```
+
+## Which governor limits each snippet touches?
+
+- Modifying fields in before triggers: minimal (no DML/SOQL), still counts toward CPU and heap.
+- After‑trigger bulk DML: DML rows (150), DML statements (150), heap size, CPU time. Aggregate DML across the transaction.
+- Queueable for mixed DML: consumes async job slot (enqueues), and async execution has its own limits (200 enqueued per 24 hours for single org applies—check docs).
+- Static guard pattern: no extra DML but uses heap and CPU.
+
+For full limits reference see the Salesforce governor limits docs: https://developer.salesforce.com/docs.
+
+Also see [Understanding Apex Transactions and Governor Limits in Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/understanding-apex-transactions-and-governor-limits-in-salesforce/index.mdx) for detailed limits and transaction examples.
+
+## Common mistakes (and how to fix them)
+
+- **Using Trigger.old on insert.** Fix: Use Trigger.new on insert, or guard with Trigger.isInsert.
+- **Modifying Trigger.new in after triggers.** Fix: Move logic to before triggers or perform explicit DML with constructed sObjects in after triggers.
+- **Running SOQL/DML inside a for loop.** Fix: Collect Ids/records, run one SOQL/DML outside the loop. See our SOQL performance guide: [Optimizing SOQL Queries for Performance in Apex](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/optimizing-soql-queries-for-performance-in-apex/index.mdx).
+- **Ignoring mixed DML errors.** Fix: Push setup-object DML to async (Queueable/@future) to separate the transactions.
+- **No recursion guard.** Fix: Add a single static boolean or Set<Id> in a handler class and check it at trigger entry.
+
+## FAQ
+
+### What is Trigger.newMap and when should I use it?
+Use Trigger.newMap on update and undelete contexts to look up the new version of a record by Id efficiently. Guard access with Trigger.isUpdate or Trigger.isUndelete.
+
+### Can I modify Trigger.old values?
+No. Trigger.old is read‑only. If you need to change values, construct new sObjects and perform an explicit DML (preferably outside loops).
+
+### Why do I get a Mixed DML Operation error in a trigger?
+Because the transaction is performing DML on both setup (User, Group) and non‑setup objects (Account, Contact). Move one operation to async (Queueable/@future) to avoid the error.
+
+### Is it okay to put SOQL inside triggers?
+Only if it’s outside loops and bulkified. Prefer handler classes where you collect Ids and run a single SOQL query. See Salesforce docs: https://developer.salesforce.com/docs for SOQL best practices.
+
+### How do I test trigger recursion guards in unit tests?
+Reset static variables between tests or use Test.startTest()/Test.stopTest(); ensure your guard supports deterministic test behavior.
+
+If you want a longer explainer and full variable table with code samples, open the full guide: [Salesforce Trigger Context Variables Explained](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/salesforce-trigger-context-variables-explained/index.mdx).
+
+Write a failing unit test for the case you’re about to change; then fix the trigger with the patterns above.
+
