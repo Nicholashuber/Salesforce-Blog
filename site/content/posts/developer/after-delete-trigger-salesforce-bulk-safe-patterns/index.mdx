@@ -1,0 +1,179 @@
+---
+title: "after delete trigger salesforce: bulk-safe patterns, real-world use
+  cases, and alternatives"
+date: 2026-07-20T09:00:00.000Z
+category: Developer
+thumbnail: after-delete-trigger-salesforce-bulk-safe-patterns.png
+tags:
+  - Apex
+  - Triggers
+  - Governor Limits
+  - Platform Events
+  - Best Practices
+keywords:
+  - after delete trigger salesforce
+  - after delete apex
+  - delete trigger salesforce
+  - trigger after delete bulk safe
+  - undelete trigger
+  - ALL ROWS soql deleted
+excerpt: "A practical guide for Apex developers and architects on after delete
+  trigger salesforce: when it runs, three production-ready use cases with
+  bulk-safe Apex, a comparison table with before-delete and soft-delete,
+  governor-limit notes, and alternatives."
+---
+
+# after delete trigger salesforce: bulk-safe patterns, real-world use cases, and alternatives
+
+Short answer
+
+An after delete trigger in Salesforce runs after the platform has removed (soft- or hard-) records from the database and after all before-delete logic has executed; Trigger.old and Trigger.oldMap contain the deleted record values, while Trigger.new is null. Use after-delete for post-removal cleanup, reparenting children, or enqueueing async reconciliation (Queueable/Platform Event); always write bulk-safe code and avoid querying deleted rows without ALL ROWS when you need them. See examples below.
+
+## How does an after delete trigger run and how is it different from other trigger events?
+
+When a delete DML executes the trigger order is: before delete → database deletes the record → after delete. For soft deletes (Recycle Bin) the record's IsDeleted becomes true; for hard deletes the platform removes the row completely.
+
+Key differences for after-delete:
+
+- Trigger.old / Trigger.oldMap: populated with the deleted records and their field values.
+- Trigger.new / Trigger.newMap: null for delete events.
+- You cannot update the deleted records themselves in the same transaction; you should act on related records.
+- Querying for the deleted rows later in the same transaction requires ALL ROWS (SOQL): e.g. SELECT Id, IsDeleted FROM Account WHERE Id IN :ids ALL ROWS.
+
+For the official ordering and deleted-row behavior see the Salesforce Developer Docs: https://developer.salesforce.com/docs
+
+## What are three production-ready use cases with bulk-safe Apex?
+
+Below are three common scenarios you will encounter in production. Each example follows a one-trigger-per-object pattern and a handler class so it remains bulk-safe and testable.
+
+### 1) Orphan cleanup: delete child records when parent is deleted
+
+When a lookup is configured without Cascade Delete, children remain after the parent is removed. Use an after-delete trigger on the parent to remove or mark those children.
+
+```apex
+// Setup → Object Manager → Account → Triggers → New
+trigger AccountAfterDelete on Account (after delete) {
+    AccountTriggerHandler.onAfterDelete(Trigger.old);
+}
+```
+
+```apex
+public with sharing class AccountTriggerHandler {
+    public static void onAfterDelete(List<Account> oldAccounts) {
+        Set<Id> oldIds = new Set<Id>();
+        for (Account a : oldAccounts) if (a.Id != null) oldIds.add(a.Id);
+        if (oldIds.isEmpty()) return;
+
+        // Bulk-safe: one SOQL, one DML
+        List<Child__c> toDelete = [SELECT Id FROM Child__c WHERE Parent__c IN :oldIds];
+        if (!toDelete.isEmpty()) delete toDelete;
+    }
+}
+```
+
+This runs for large deletes; watch DML rows (10,000 row limit) and batch if necessary.
+
+### 2) Child cascade reparenting: set lookup on children to a fallback when parent is deleted
+
+If business rules require children to be moved to a holding record rather than deleted, collect child records and update them in bulk.
+
+```apex
+public static void reparentChildrenToFallback(Set<Id> parentIds, Id fallbackAccountId) {
+    List<Contact> contactsToUpdate = [SELECT Id, AccountId FROM Contact WHERE AccountId IN :parentIds];
+    for (Contact c : contactsToUpdate) c.AccountId = fallbackAccountId;
+    if (!contactsToUpdate.isEmpty()) update contactsToUpdate;
+}
+```
+
+Call this from the handler passing a fallback Id retrieved from Custom Metadata or Custom Setting (do not hardcode Ids).
+
+### 3) Async reconciliation: publish a Platform Event or enqueue a Queueable for heavy processing
+
+Use after-delete to publish a Platform Event or enqueue a Queueable job for work that exceeds synchronous governor limits (aggregation, external sync, heavy recalculation).
+
+```apex
+public class DeletedRecordsReconciler implements Queueable, Database.AllowsCallouts {
+    private Set<Id> deletedIds;
+    public DeletedRecordsReconciler(Set<Id> ids){ this.deletedIds = ids; }
+    public void execute(QueueableContext ctx){
+        // run heavyweight processing here
+    }
+}
+
+// in handler
+System.enqueueJob(new DeletedRecordsReconciler(oldIds));
+```
+
+Or publish a platform event (see our post on Building Scalable Salesforce Integrations with Platform Events for patterns) [Building Scalable Salesforce Integrations with Platform Events](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/building-scalable-salesforce-integrations-with-platform-events/index.mdx).
+
+## How do after-delete, before-delete, and soft-delete (ALL ROWS) compare?
+
+| Feature | before delete | after delete | querying deleted rows (ALL ROWS) |
+|---|---:|---:|---|
+| Trigger context available | Trigger.old | Trigger.old; Trigger.new null | n/a — SOQL modifier to include deleted rows |
+| Can prevent delete | Yes (use addError) | No | n/a |
+| Use case | validation, stop delete | cleanup, reparent, async work | read IsDeleted or historical data in same tx |
+| Access to deleted rows via SOQL without ALL ROWS | No | No | Use ALL ROWS: SELECT Id, IsDeleted FROM SObject WHERE Id IN :ids ALL ROWS |
+
+## What governor limits matter for after-delete handlers?
+
+- SOQL queries per Apex transaction: 100 synchronous, 200 asynchronous. Pull SOQL outside loops and reduce queries with maps.
+- DML rows per transaction: 10,000. For large deletes, move cleanup into Batchable or Queueable processing.
+- CPU time and heap can also be hit by large collections; favor streaming (Batch Apex) for >10k changes.
+
+See the Salesforce Developer Docs for the complete list of governor limits: https://developer.salesforce.com/docs
+
+## What are recommended alternatives to after-delete triggers?
+
+- Record-triggered Flow on delete: good for simple reparenting or field updates; Setup → Flows → New → Record-Triggered Flow (A record is deleted). Flows are preferable for admin-manageable logic.
+- Platform Events: publish a platform event in after-delete and let a subscriber (Trigger/Flow/External) handle heavy work; useful for decoupling and retries. See our Platform Events post for patterns.
+- Batchable Apex: if cleanup requires processing more than governor limits allow, schedule a Batchable job from the trigger (enqueue small batches from trigger then let Batchable handle full workload).
+
+## Best practices for after-delete triggers
+
+- One trigger per object. Delegate work to a handler class.
+- Bulkify everything: collect Ids, run a single SOQL per operation, and perform DML once per collection.
+- Do not put SOQL or DML inside loops.
+- Prefer Queueable or Platform Events for expensive operations.
+- Store configuration (fallback IDs, thresholds) in Custom Metadata Types rather than hardcoding.
+- Write unit tests that assert behavior on bulk deletes (200 records) and mixed transactions.
+
+## Common mistakes and how to fix them
+
+- **Mistake: Querying the deleted rows without ALL ROWS.** Fix: use Trigger.old for deleted values or use `ALL ROWS` in SOQL when you must query the DB for deleted rows.
+- **Mistake: Performing thousands of DML rows synchronously.** Fix: offload to Batchable or schedule a Queueable job that processes in smaller chunks.
+- **Mistake: Assuming Trigger.new exists.** Fix: for delete triggers, always use Trigger.old/Trigger.oldMap and guard against null Trigger.new.
+- **Mistake: Relying on implicit cascade-delete.** Fix: explicitly handle child cleanup or reparenting; test with real relationships.
+
+## Trigger context variable cheat-sheet for delete scenarios
+
+- Trigger.isDelete → true
+- Trigger.isAfter → true (for after-delete)
+- Trigger.isBefore → true for before-delete, false for after-delete
+- Trigger.old → list of deleted SObjects with field values
+- Trigger.oldMap → map<Id,SObject> of deleted records
+- Trigger.new / newMap → null during delete
+- Use ALL ROWS in SOQL when you must query rows marked IsDeleted = true
+
+## FAQ
+
+### Can I query deleted records in an after delete trigger?
+Yes, but only if you use ALL ROWS in SOQL (SELECT Id, IsDeleted FROM Account WHERE Id IN :ids ALL ROWS). Often Trigger.old already contains the values you need without an extra query.
+
+### Do after-delete triggers run on hard deletes?
+Triggers run for both soft and hard deletes initiated by the platform DML. Hard-delete via some APIs has different behavior; consult the Developer Docs for your exact API and release behavior: https://developer.salesforce.com/docs
+
+### Can I prevent a delete in after-delete?
+No. Use before-delete with addError to stop deletion. After-delete is for post-removal work only.
+
+### Should I put heavy processing in the after-delete trigger?
+No. Offload heavy work to Queueable, Batchable, or publish a Platform Event to avoid hitting synchronous governor limits.
+
+### Is a Record-Triggered Flow on delete a valid alternative?
+Yes for simple tasks (field changes on related records, immediate reparent). For complex logic or external callouts, prefer Queueable or Platform Events.
+
+For deeper reading on trigger variables and trigger design patterns see Salesforce Trigger Context Variables Explained and Best Practices for Apex Trigger Optimization.
+
+Use this guide as your quick reference while building or reviewing delete-handling logic: test at 200-record scale, avoid SOQL/DML in loops, and pick async patterns when limits loom.
+
+
