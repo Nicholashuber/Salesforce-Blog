@@ -1,0 +1,223 @@
+---
+title: "Flow to Apex handoff patterns: keep automation click-friendly and scale
+  to millions"
+date: 2026-07-23T09:00:00.000Z
+category: Administrator
+thumbnail: flow-to-apex-handoff.png
+tags:
+  - Flow Builder
+  - Apex
+  - Platform Events
+  - Batch Apex
+  - Architect patterns
+  - Admin best practices
+keywords:
+  - flow to apex handoff
+  - Apex invocable
+  - platform events
+  - queueable apex
+  - batchable apex
+  - scheduled flow
+  - record-triggered flow
+excerpt: When your Salesforce automation starts hitting limits, move only the
+  heavy lifting to Apex. This Flow to Apex handoff guide gives a decision
+  framework plus three production-tested patterns (synchronous Invocable, queued
+  Platform Event → Queueable, and Batchable invoked from a scheduled flow) with
+  code, Flow breadcrumbs, and a migration checklist.
+---
+
+# Flow to Apex handoff patterns: keep automation click-friendly and scale to millions
+
+Short answer: Keep business logic in Flow when the work is record-local, deterministic, and cheap (before-save field updates, simple decisions). Move to Apex when you need blocking validations across children/related objects, high-volume async processing, or backfills spanning millions of rows. Use three patterns shown below — synchronous Invocable for validations, Platform Event → Queueable for near-real-time bulk work, and Batchable invoked from a scheduled flow for historic backfills — each with click steps and copy-paste Apex.
+
+## What decision framework tells you when to do a flow to apex handoff?
+
+- Keep in Flow when operations run inside a single record transaction, touch <200 records, and require no complex SOQL joins or external API calls (example: before-save field updates, simple validations). Use Flow Builder for maintainability and to keep Admin control.
+- Move to Apex when you need one or more of: cross-object validation that must block a save across related records, >200-record-scale processing, advanced SOQL (semi-joins, aggregate queries), external callouts, or advanced retry/error handling.
+- Intermediate: use Flow + Apex handoff when Flow should stay the orchestration surface but heavy work must run elsewhere.
+
+## How to implement synchronous Apex (Invocable) for record-triggered validations?
+
+When you must run a validation that checks other objects and prevent a save, call a bulk Invocable Apex action from a record-triggered Flow and throw on invalid state. This keeps the Flow UI for admins while enforcing rules in code.
+
+Setup (clicks):
+1. Setup → Flows → New → Record-Triggered Flow. Trigger on the object, choose After Save if you plan to throw an exception from Apex to roll back. (If you need before-save field changes, keep them in before-save flow.)
+2. Add an Action → Apex, select your Invocable action (see code below). Map {!Record.Id} or collection variable.
+3. Add Decision to handle successful or failed responses if your Invocable returns status; otherwise let Apex throw an exception to surface a Flow error and stop the transaction.
+
+Apex (Invocable) example — synchronous validation (bulkified):
+
+```apex
+public with sharing class FlowValidationAction {
+    public class Req {
+        @InvocableVariable public Id recordId;
+    }
+    public class Resp {
+        @InvocableVariable public Boolean ok;
+        @InvocableVariable public String message;
+    }
+
+    public class ValidationException extends Exception {}
+
+    @InvocableMethod(label='Validate Opportunity Business Rule')
+    public static List<Resp> run(List<Req> requests) {
+        Set<Id> ids = new Set<Id>();
+        for (Req r : requests) ids.add(r.recordId);
+
+        Map<Id, Opportunity> opportunities = new Map<Id, Opportunity>([
+            SELECT Id, StageName, AccountId, (SELECT Id, Status__c FROM Child_Objects__r)
+            FROM Opportunity
+            WHERE Id IN :ids
+        ]);
+
+        List<Resp> results = new List<Resp>();
+        for (Req r : requests) {
+            Opportunity o = opportunities.get(r.recordId);
+            Resp res = new Resp();
+            // Example rule: block close if any child has Status 'Blocked'
+            Boolean blocked = false;
+            for (Child__c c : o.Child_Objects__r) {
+                if (c.Status__c == 'Blocked') { blocked = true; break; }
+            }
+            if (blocked) {
+                // Throwing rolls back the transaction and surfaces an error to the Flow/UI
+                throw new ValidationException('Cannot set this Opportunity: a child record is Blocked.');
+            }
+            res.ok = true; res.message = 'ok';
+            results.add(res);
+        }
+        return results;
+    }
+}
+```
+
+Notes: the Invocable is bulk-safe (queries once). Throwing a custom exception will roll back the DML and surface the message. Test coverage must simulate multiple records.
+
+## How to use Platform Events to queue bulk work (Flow publishes event → Queueable Apex processes)?
+
+Use this when you need near-real-time offload and the incoming transaction must finish fast. The Flow creates Platform Event messages; a platform-event-triggered Apex handler collects ids and enqueues a Queueable/Batchable job.
+
+Setup (clicks):
+1. Setup → Platform Events → New Platform Event. Add text/ID fields (e.g., RecordId__c).
+2. In your record-triggered Flow (after-save), Create Records → BulkWork__e, set RecordId__c = {!Record.Id}.
+3. Create an Apex trigger on BulkWork__e that enqueues a Queueable job.
+
+Apex: platform event trigger + Queueable processor
+
+```apex
+public class BulkWorkProcessor implements Queueable {
+    private List<Id> ids;
+    public BulkWorkProcessor(List<Id> ids){ this.ids = ids; }
+    public void execute(QueueableContext ctx){
+        // Bulk-safe processing, single SOQL per chunk
+        List<Account> accts = [SELECT Id, Name FROM Account WHERE Id IN :ids];
+        // do work; keep DML out of loops
+        for (Account a : accts) {
+            a.Description = 'Processed at ' + Datetime.now();
+        }
+        update accts;
+    }
+}
+
+trigger BulkWorkEventTrigger on BulkWork__e (after insert) {
+    Set<Id> ids = new Set<Id>();
+    for (BulkWork__e ev : Trigger.New) {
+        if (ev.RecordId__c != null) ids.add((Id)ev.RecordId__c);
+    }
+    if (!ids.isEmpty()) {
+        System.enqueueJob(new BulkWorkProcessor(new List<Id>(ids)));
+    }
+}
+```
+
+Notes: Platform events are durable but not guaranteed-at-most-once delivery; design idempotent processors. Queueable jobs respect the normal limits (max 50 chain enqueues) and run asynchronously with their own governor allocation.
+
+See also: our guide on Building Scalable Salesforce Integrations with Platform Events for integration-specific patterns.
+
+## How to call Batchable Apex from a scheduled flow for historic backfills?
+
+Use a Schedule-Triggered Flow as the admin orchestration surface that invokes an Invocable wrapper which calls Database.executeBatch. This keeps scheduling in clicks and heavy lifting in Batch Apex.
+
+Setup (clicks):
+1. Setup → Flows → New → Schedule-Triggered Flow. Configure cadence and start date.
+2. Add Action → Apex and pick the Invocable wrapper (below) which starts the batch.
+
+Apex: Batchable + Invocable starter
+
+```apex
+public class BackfillBatch implements Database.Batchable<sObject>, Database.Stateful {
+    public String query;
+    public BackfillBatch(String q){ query = q; }
+    public Database.QueryLocator start(Database.BatchableContext ctx){
+        return Database.getQueryLocator(query);
+    }
+    public void execute(Database.BatchableContext ctx, List<sObject> scope){
+        List<Opportunity> ops = (List<Opportunity>)scope;
+        // do work safely
+        for (Opportunity o : ops) {
+            o.Description = 'Backfilled ' + Datetime.now();
+        }
+        update ops;
+    }
+    public void finish(Database.BatchableContext ctx){ }
+}
+
+public class BatchInvoker {
+    public class Req { @InvocableVariable public String soqlQuery; @InvocableVariable public Integer batchSize; }
+    @InvocableMethod(label='Start Backfill Batch')
+    public static void start(List<Req> reqs){
+        for (Req r : reqs) {
+            Integer size = (r.batchSize == null) ? 200 : r.batchSize;
+            Database.executeBatch(new BackfillBatch(r.soqlQuery), size);
+        }
+    }
+}
+```
+
+Notes: Batches are the right fit for millions of rows. Monitor Apex Jobs and set an appropriate batch size; smaller sizes reduce CPU and heap pressure but increase number of transactions.
+
+## Performance and governor-limit notes for each pattern
+
+- Synchronous Invocable: runs in the same transaction as the Flow. Respect per-transaction limits: 100 SOQL queries, 150 DML rows per DML statement, 6MB heap (synchronous), CPU 10K ms. Keep queries aggregated and avoid nested loops.
+- Platform Event → Queueable: publisher is fast; the Queueable runs in its own async transaction with its own limits (50 SOQL, 200 DML rows total across statements). Make processing idempotent because event delivery can repeat.
+- Batchable: each execute() gets its own governor limits and can process up to the batch size. Use Database.getQueryLocator for large data. Prefer batch chaining only when necessary.
+
+## Migration checklist to avoid silent failures
+
+- Add logging: write a Custom Object (Async_Job_Log__c) or use Platform Event for failure telemetry.
+- Expose errors: return status objects from Invocable actions when possible; don't swallow exceptions silently.
+- Test coverage: include multi-record tests with mixed valid/invalid rows and assert rollback behavior.
+- Permission checks: scheduled flows and Apex run in different contexts; verify the running user has required object/field permissions or run-as a System user where appropriate.
+- Idempotency: design processors so repeated messages (Platform Events) or retries do not duplicate business effects.
+- Monitoring: add dashboards for Apex Jobs, Platform Event Delivery, Flow Interview failures, and subscribe to email alerts for job failures.
+
+## Common mistakes (and how to fix them)
+
+- **Keeping everything in one giant Flow.** Split orchestration to Flow and heavy logic to Apex. Use Flows for state and simple rules; call Apex for heavy joins or millions of rows.
+- **Calling synchronous Apex that runs extra SOQL per record.** Fix by bulkifying: collect IDs, query once outside loops, and map results.
+- **Assuming Platform Events are exactly-once.** Fix by making processes idempotent and tracking processed keys.
+- **Starting Batch jobs from UI flows without a guard.** Fix by adding a dry-run flag and safeguards (Custom Metadata limits) before launching large backfills.
+- **No observability for async failures.** Fix by writing errors to a monitoring object and sending alerts when jobs fail.
+
+## FAQ
+
+### What is a "flow to apex handoff" and why not rewrite Flows in Apex?
+A flow to apex handoff means keeping Flow as the orchestration/administration surface and moving heavy or complex work into Apex. You avoid rewriting Flows when only specific tasks breach limits; this keeps admin-friendly interfaces and reduces risk.
+
+### Can I call an Invocable Apex from a before-save flow?
+No — Apex actions are only available to autolaunched/after-save Flows. For blocking validations that must run before commit, either keep them as before-save Flow logic (if simple) or use an Apex trigger or an after-save Flow that calls Apex and throws to roll back.
+
+### Should Platform Events or Queueable be used for high-throughput processing?
+Use Platform Events when you want durable, decoupled publish/subscribe behavior and near-real-time. Use Queueable for short async workloads and Batchable when processing large datasets.
+
+### How do I monitor failures in queued or batch jobs triggered by Flow?
+Monitor Apex Jobs (Setup → Jobs → Apex Jobs), Platform Event Delivery metrics, and Flow Errors (Setup → Paused and Failed Flow Interviews). Add a custom logging object for business-level telemetry.
+
+### Can scheduled flows start a Batch Apex job?
+Yes. A Schedule-Triggered Flow can call an Invocable Apex action that runs Database.executeBatch; use that pattern to keep scheduling in clicks and heavy processing in code.
+
+For a refresher on Flow Builder basics, see Mastering Flow Builder in Salesforce: Automate Without Code. For scheduling patterns that call Apex, our guide Automating Salesforce Record Updates with Scheduled Flows explains the Flow side of scheduled orchestration.
+
+Choose the smallest handoff that solves the scale problem: keep clicks where they add value; move code only for scale, cross-object joins, or advanced retry/error handling.
+
+Start by adding a single Invocable wrapper, instrumenting it with logging, and running a small pilot backfill to validate performance.
