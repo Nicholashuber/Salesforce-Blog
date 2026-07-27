@@ -1,0 +1,234 @@
+---
+title: "Apex with sharing vs without sharing: exact rules, gotchas, and
+  production examples"
+date: 2026-07-27T09:00:00.000Z
+category: Developer
+thumbnail: apex-with-sharing-vs-without-sharing.png
+tags:
+  - Apex
+  - Sharing
+  - Security
+  - Triggers
+  - Asynchronous Apex
+  - Testing
+keywords:
+  - apex with sharing vs without sharing
+  - Apex execution context
+  - with sharing without sharing inherited sharing
+  - Apex system mode vs user mode
+  - Apex FLS CRUD checks
+excerpt: Short, precise rules for when Apex runs in user-mode vs system-mode and
+  the concrete effect on record visibility, sharing recalculation, and
+  field-level security. Includes a quick rule table, four runnable Apex examples
+  (trigger, Queueable, @future, REST), unit-test patterns, and an auditor
+  checklist.
+---
+
+# Apex with sharing vs without sharing: exact rules, gotchas, and production examples
+
+Short answer
+
+Apex runs in system mode by default (ignores a user's CRUD/FLS and sharing). The with sharing / without sharing modifiers only affect record-level sharing, not CRUD or field-level security. Use with sharing on classes you want to respect who can see records; enforce CRUD/FLS explicitly with Security.stripInaccessible or describe calls. Below: a compact rule table, four copy-pasteable examples, unit-test patterns, common mistakes, and an auditor checklist.
+
+## What is the short rule table for execution mode?
+
+| Context | Default sharing behavior | CRUD/FLS enforced automatically? |
+|---|---:|---:|
+| Trigger (no class modifier) | System mode — sharing not enforced | No |
+| Apex class declared `with sharing` | Enforces record-level sharing for the running user | No (must check) |
+| Apex class declared `without sharing` | Ignores record-level sharing | No |
+| Apex class declared `inherited sharing` | Inherits the sharing setting from the caller | No |
+| Asynchronous Apex (Queueable/@future/Batch) | Executes with the sharing mode declared on the class at runtime | No |
+| @RestResource / WebService Apex | System mode unless class uses `with sharing`/`inherited sharing` | No |
+
+Source: [Salesforce Developer Docs](https://developer.salesforce.com/docs).
+
+## How does this affect record visibility and sharing recalculation?
+
+- Record visibility: `with sharing` will apply sharing filters on SOQL executed inside that class (and classes it directly controls). `without sharing` and default classes run without those filters.
+- Sharing recalculation: DML that updates Owner or Sharing recalculation rules run normally (sharing recalculation is an org process); `with sharing` does not block sharing recalculation. Sharing recalculation happens after commit as usual.
+- In triggers: triggers execute in system mode. If the trigger calls a `with sharing` class to perform SOQL, that class's sharing is applied to its queries.
+
+For the canonical developer rules, see the Apex language reference in the Developer Docs.
+
+## How to keep field-level security and CRUD checks correct?
+
+Apex does not automatically enforce CRUD or FLS. Use one of these patterns:
+
+- Security.stripInaccessible to remove fields a user can't access:
+
+```apex
+// Removes inaccessible fields before DML or before returning records to a client
+List<SObject> safe = Security.stripInaccessible(
+    AccessType.REMOVE_INVALID_FIELDS, mySObjectList);
+```
+
+- Explicit checks with Describe:
+
+```apex
+if (!Schema.sObjectType.Account.isCreateable()) {
+  throw new AuthorizationException('No create permission on Account');
+}
+if (!Schema.sObjectType.Account.fields.Name.isCreateable()) {
+  throw new AuthorizationException('No create permission on Account.Name');
+}
+```
+
+Use stripInaccessible when returning records from API endpoints or before DML to avoid leaking or writing fields the caller can't access.
+
+## What does this look like in real code? 4 runnable examples
+
+Notes: each example is self-contained. Replace package/namespace lines if needed.
+
+### 1) Synchronous trigger calling a with/without sharing handler
+
+```apex
+// Trigger: Setup -> Object Manager -> Account -> Triggers
+trigger AccountAfterInsert on Account (after insert) {
+  AccountTriggerHandler.handleAfterInsert(Trigger.new);
+}
+
+// Handler class (with sharing)
+public with sharing class AccountTriggerHandler {
+  public static void handleAfterInsert(List<Account> newAccounts) {
+    // This query respects the running user's sharing when executed here
+    List<Opportunity> ops = [
+      SELECT Id, Name FROM Opportunity WHERE AccountId IN :newAccounts
+    ];
+    // business logic here
+  }
+}
+
+// Alternate: public without sharing class AccountTriggerHandler { ... }
+```
+
+If you need the trigger to always ignore sharing, call a `without sharing` helper class instead.
+
+### 2) Queueable: sharing set by the class modifier
+
+```apex
+public with sharing class CleanUpQueueable implements Queueable {
+  public void execute(QueueableContext ctx) {
+    // queries here will respect sharing
+    List<Case> casesToClose = [SELECT Id FROM Case WHERE Status = 'Stale'];
+    // perform updates
+    update casesToClose;
+  }
+}
+
+// enqueue: System.enqueueJob(new CleanUpQueueable());
+```
+
+A Queueable declared `without sharing` will ignore sharing at execution time.
+
+### 3) @future: static method in a class with sharing
+
+```apex
+public with sharing class AsyncNotifier {
+  @future(callout=false)
+  public static void notifyOwners(Set<Id> accountIds) {
+    List<User> owners = [SELECT Id, Email FROM User WHERE Id IN (
+      SELECT OwnerId FROM Account WHERE Id IN :accountIds
+    )];
+    // runs with 'with sharing' semantics from this class
+  }
+}
+```
+
+Remember: future methods are static and inherit the class sharing modifier.
+
+### 4) Apex REST endpoint: choose sharing deliberately
+
+```apex
+@RestResource(urlMapping='/accounts/v1/*')
+public with sharing class AccountApi {
+  @HttpGet
+  global static Account doGet() {
+    RestRequest req = RestContext.request;
+    Id acctId = (Id)req.params.get('id');
+    // respects sharing; will only return if caller can see the account
+    Account a = [SELECT Id, Name, Industry FROM Account WHERE Id = :acctId];
+    // remove fields the caller cannot access
+    return (Account) Security.stripInaccessible(
+      AccessType.REMOVE_INVALID_FIELDS, new List<SObject>{a})[0];
+  }
+}
+```
+
+If you declare this endpoint `without sharing`, callers can retrieve records regardless of record-level sharing; still strip FLS before returning.
+
+## What unit-test patterns prove sharing behavior?
+
+1. Use System.runAs(user) to simulate another user's sharing and role. Create users and assign them as owners for records you query.
+2. Test both classes: one `with sharing` and one `without sharing`. Assert that the `with sharing` class returns zero records when the user has no access and `without sharing` returns records.
+3. Use SeeAllData=false (default) and create records inside the test.
+
+Example test snippet:
+
+```apex
+@IsTest
+private class SharingModeTest {
+  @IsTest static void testWithVsWithoutSharing() {
+    // create users
+    Profile p = [SELECT Id FROM Profile WHERE Name='Standard User' LIMIT 1];
+    User owner = new User(Alias='own', Email='o@example.com',
+      EmailEncodingKey='UTF-8', LastName='Owner', LanguageLocaleKey='en_US',
+      LocaleSidKey='en_US', ProfileId=p.Id, TimeZoneSidKey='America/Los_Angeles',
+      UserName='owner@example.com');
+    insert owner;
+
+    User limitedUser = new User(Alias='lim', Email='l@example.com',
+      EmailEncodingKey='UTF-8', LastName='Limited', LanguageLocaleKey='en_US',
+      LocaleSidKey='en_US', ProfileId=p.Id, TimeZoneSidKey='America/Los_Angeles',
+      UserName='limited@example.com');
+    insert limitedUser;
+
+    Account a = new Account(Name='Acme', OwnerId=owner.Id);
+    insert a;
+
+    System.runAs(limitedUser) {
+      // call helper declared 'with sharing'
+      Integer countWith = SharingTestHelpers.callWithSharing(a.Id);
+      Integer countWithout = SharingTestHelpers.callWithoutSharing(a.Id);
+      System.assertEquals(0, countWith, 'with sharing should hide record');
+      System.assertEquals(1, countWithout, 'without sharing should see record');
+    }
+  }
+}
+```
+
+Implement Helpers so they call your real classes; keep tests small and focused.
+
+## Common mistakes (and how to fix them)
+
+- **Assuming `with sharing` enforces FLS/CRUD.** Fix: use Security.stripInaccessible or describe checks before returning or writing fields.
+- **Putting sharing-sensitive queries in triggers directly.** Fix: keep triggers thin and call a properly-modified handler class (with sharing or without sharing as required). See our guide on [Best Practices for Apex Trigger Optimization](/advanced-salesforce-trigger-design-patterns-ensuring-efficiency-and-scalability).
+- **Not testing async sharing behavior.** Fix: write unit tests that enqueue/execute Queueable/@future in a test and assert visibility with System.runAs.
+- **Using `without sharing` globally to avoid permission problems.** Fix: document and minimize `without sharing` usage; restrict it to small helper classes that clearly state why system access is required.
+
+## FAQ
+
+### Does `with sharing` enforce field-level security?
+No. `with sharing` only affects record-level sharing. Enforce field-level security using Security.stripInaccessible or describe field access checks.
+
+### If a trigger calls a `with sharing` class, will the query respect the running user’s sharing?
+Yes. The `with sharing` class enforces the sharing of the user who initiated the transaction.
+
+### Do asynchronous jobs inherit sharing from the caller?
+No — async jobs execute using the sharing mode declared on the class at runtime (the class should be declared with or without sharing explicitly).
+
+### What does `inherited sharing` do?
+`inherited sharing` makes a class use the sharing mode of the caller; it’s useful for library classes invoked from both user-mode calling code and system-mode callers.
+
+### Where can I read the official rules?
+See the Apex language reference and execution model on the [Salesforce Developer Docs](https://developer.salesforce.com/docs).
+
+## Auditor checklist (quick)
+
+- Every public entry point (REST, scheduled, queueable, batch) has an explicit sharing modifier or documented reason for default behavior.
+- FLS/CRUD enforcement is present (Security.stripInaccessible or explicit describe checks) where data is returned or written.
+- Unit tests use System.runAs to prove sharing behavior for both `with sharing` and `without sharing` code paths.
+- `without sharing` usage is limited, documented, and reviewed for least-privilege necessity.
+- Triggers are thin; heavy work happens in classes with explicit sharing declarations. See [Salesforce Trigger Context Variables Explained](/salesforce-trigger-context-variables-explained/) for trigger patterns.
+
+RunAs your next step: pick a trigger or REST endpoint in your org, add explicit sharing modifiers to called classes, add stripInaccessible before returning objects, and add a System.runAs unit test proving the desired visibility.
