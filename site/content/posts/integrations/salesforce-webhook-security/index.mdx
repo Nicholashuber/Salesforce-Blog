@@ -1,0 +1,223 @@
+---
+title: "salesforce webhook security: verify signatures, prevent replay attacks,
+  and scale with Platform Events"
+date: 2026-07-30T09:00:00.000Z
+category: Integrations
+thumbnail: salesforce-webhook-security.png
+tags:
+  - Apex
+  - Platform Events
+  - Integrations
+  - Security
+  - Experience Cloud
+keywords:
+  - salesforce webhook security
+  - webhook signature verification apex
+  - prevent replay attacks salesforce
+  - platform events webhook
+  - apex rest webhook listener
+excerpt: "A short checklist and step-by-step recipes to accept webhooks safely
+  in Salesforce: authenticate callers, verify HMAC signatures in Apex, prevent
+  replay attacks with nonce+timestamp, rate-limit spikes, and offload work using
+  Platform Events + Batch Apex."
+---
+
+# salesforce webhook security: verify signatures, prevent replay attacks, and scale with Platform Events
+
+Short answer
+
+To secure incoming webhooks to Salesforce, accept them at a dedicated Apex REST endpoint, verify the provider's HMAC signature using a secret stored out-of-band, reject requests with stale timestamps or reused nonces, and immediately enqueue valid payloads into a Platform Event for async processing. Apply rate-limiting patterns and monitoring; run heavy transforms in Batch Apex against a staging table.
+
+## How do I authenticate the webhook sender (Connected App + Named Credential)?
+
+You have two common options for authenticating the caller before signature checks:
+
+1. Use the provider's HMAC signature (recommended primary control). Store the shared secret in a protected Custom Metadata Type or a Named Credential if Salesforce must call the provider.
+2. If the provider supports OAuth, register a Connected App so the external system can request tokens for calls into your authenticated endpoints (useful when the caller is another internal service).
+
+Setup steps (Connected App)
+
+1. Setup → Apps → App Manager → New Connected App.
+2. Enter a name, API name, and contact email.
+3. Enable OAuth Settings and add scopes (e.g., api, refresh_token).
+4. Configure callback if needed; record Consumer Key and Consumer Secret.
+
+If Salesforce needs to call the provider (for challenge/validation), use a Named Credential.
+
+Setup steps (Named Credential)
+
+1. Setup → Security → Named Credentials → New Named Credential.
+2. Enter the provider URL and select authentication (OAuth 2.0, Password, or Certificate).
+3. Reference the Connected App if using OAuth.
+
+Docs: see the Connected App and Named Credential pages on the Salesforce developer docs for details: https://developer.salesforce.com/docs
+
+## How do I verify an HMAC signature in Apex? (copy-pasteable listener)
+
+The following Apex REST listener shows a practical pattern: verify X-Signature (HMAC SHA256 hex), check timestamp and nonce (replay protection), publish a Platform Event on success, and return proper HTTP codes.
+
+```apex
+// Apex class: WebhookReceiver
+@RestResource(urlMapping='/webhook/*')
+global with sharing class WebhookReceiver {
+    // Name of a Protected Custom Metadata or Custom Setting that stores the shared secret
+    private static final String SHARED_SECRET = Webhook_Secret__mdt.getInstance('Default').Secret__c;
+    private static final Integer ALLOWED_SKEW_SECONDS = 300; // 5 minutes
+
+    @HttpPost
+    global static void receive() {
+        RestRequest req = RestContext.request;
+        String body = req.requestBody.toString();
+        String sigHeader = req.headers.get('X-Signature');
+        String tsHeader = req.headers.get('X-Timestamp');
+        String nonceHeader = req.headers.get('X-Nonce');
+
+        if (String.isBlank(sigHeader) || String.isBlank(tsHeader) || String.isBlank(nonceHeader)) {
+            RestContext.response.statusCode = 401;
+            RestContext.response.responseBody = Blob.valueOf('missing-auth-headers');
+            return;
+        }
+
+        // 1) Timestamp check
+        Long ts;
+        try { ts = Long.valueOf(tsHeader); } catch (Exception e) {
+            RestContext.response.statusCode = 400; RestContext.response.responseBody = Blob.valueOf('bad-timestamp'); return;
+        }
+        Long nowSec = System.currentTimeMillis() / 1000;
+        if (Math.abs(nowSec - ts) > ALLOWED_SKEW_SECONDS) {
+            RestContext.response.statusCode = 408; RestContext.response.responseBody = Blob.valueOf('timestamp-skew'); return;
+        }
+
+        // 2) Nonce check — simple staging custom object: Webhook_Nonce__c (Nonce__c text)
+        List<Webhook_Nonce__c> existing = [SELECT Id FROM Webhook_Nonce__c WHERE Nonce__c = :nonceHeader LIMIT 1];
+        if (!existing.isEmpty()) {
+            RestContext.response.statusCode = 409; RestContext.response.responseBody = Blob.valueOf('replay-detected'); return;
+        }
+        try {
+            insert new Webhook_Nonce__c(Nonce__c = nonceHeader);
+        } catch (Exception e) {
+            // Best-effort; continue if insert fails due to concurrent insert — still verify signature
+        }
+
+        // 3) Signature verification — provider must define exact scheme (hex/base64). Example: HMAC-SHA256 hex
+        Blob mac = Crypto.generateMac('HMACSHA256', Blob.valueOf(body), Blob.valueOf(SHARED_SECRET));
+        String expectedHex = EncodingUtil.convertToHex(mac);
+        // header may be in format: sha256=<hex>
+        if (sigHeader.startsWith('sha256=')) sigHeader = sigHeader.substringAfter('sha256=');
+        if (!expectedHex.equalsIgnoreCase(sigHeader)) {
+            RestContext.response.statusCode = 401; RestContext.response.responseBody = Blob.valueOf('signature-mismatch'); return;
+        }
+
+        // 4) Publish as Platform Event for async processing
+        Webhook_Event__e evt = new Webhook_Event__e(Body__c = body, ReceivedAt__c = Datetime.now());
+        EventBus.publish(evt);
+
+        RestContext.response.statusCode = 200;
+        RestContext.response.responseBody = Blob.valueOf('ok');
+    }
+}
+```
+
+Notes:
+
+- Store SHARED_SECRET in protected Custom Metadata (Webhook_Secret__mdt) or a protected Named Credential if Salesforce must call the provider.
+- The provider must state how it encodes signatures (hex vs base64). Match that precisely.
+
+## How do I prevent replay attacks (nonce & timestamp) correctly?
+
+- Require both a timestamp and a nonce header.
+- Reject requests where |now - timestamp| > allowed skew (suggest 300s).
+- Maintain a short-lived nonce store (custom object Webhook_Nonce__c or Platform Cache) and reject reused nonces. Delete records older than skew + small buffer via scheduled Apex.
+- If using Platform Cache, use a cache key per nonce with time-to-live equal to allowed skew.
+
+Trade-offs
+
+- Custom object persistence is durable and auditable but costs DML and storage.
+- Platform Cache is faster and avoids DML but depends on cache size and is ephemeral.
+
+## How do I scale and offload processing with Platform Events + Batch Apex?
+
+Pattern:
+
+1. Webhook -> Apex REST verifies signature & replay -> publish Platform Event (lightweight).
+2. Platform Event trigger writes a small staging record (Webhook_Staging__c) or directly fires a record that a Batch Apex job will process.
+3. Batch Apex periodically processes the staging table for long-running tasks (heavy transforms, external callouts, large DML).
+
+Example: publish + trigger (minimal work in trigger)
+
+```apex
+// Trigger on Platform Event (Webook_Event__e)
+trigger WEBHOOK_PE_Trigger on Webhook_Event__e (after insert) {
+    List<Webhook_Staging__c> rows = new List<Webhook_Staging__c>();
+    for (Webhook_Event__e e : Trigger.New) {
+        rows.add(new Webhook_Staging__c(Raw_Payload__c = e.Body__c, Received_At__c = e.ReceivedAt__c));
+    }
+    insert rows;
+}
+```
+
+Batch Apex to process staging records
+
+```apex
+public with sharing class WebhookStagingProcessor implements Database.Batchable<sObject> {
+    public Database.QueryLocator start(Database.BatchableContext bc) {
+        return Database.getQueryLocator([SELECT Id, Raw_Payload__c FROM Webhook_Staging__c WHERE Processed__c = FALSE LIMIT 20000]);
+    }
+    public void execute(Database.BatchableContext bc, List<Webhook_Staging__c> scope) {
+        // heavy work here: parse JSON, callouts (with callout=true if needed), large DML
+    }
+    public void finish(Database.BatchableContext bc) {}
+}
+```
+
+If you already use Platform Events for other integrations, read our post on Building Scalable Salesforce Integrations with Platform Events for more architecture examples: [Building Scalable Salesforce Integrations with Platform Events](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/building-scalable-salesforce-integrations-with-platform-events/index.mdx).
+
+## How do I rate-limit spikes and monitor webhook traffic?
+
+Rate-limiting approaches
+
+- Upstream throttling: ask the provider to respect a published rate; use their retry headers.
+- Token bucket inside Salesforce: maintain a small in-org counter (Cache or Custom Object) and return 429 when exceeded.
+- Queue spikes to Platform Events and set a maximum concurrent processing window via scheduled Batch Apex.
+
+Monitoring and alerting
+
+- Create a report on Webhook_Staging__c with counts, error flags, and age; schedule the report to email owners when thresholds hit.
+- Send critical failures (signature mismatches, repeated 5xx) to a dedicated error queue object and add an email alert or Platform Event for ops.
+- Use Setup → Apex Exception Email and set a dedicated address for webhook-processing errors.
+
+For scheduled processing best practices, see Automating Processes with Apex Batch Jobs in Salesforce: [Automating Processes with Apex Batch Jobs in Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/automating-processes-with-apex-batch-jobs-in-salesforce/index.mdx).
+
+## Common mistakes (and how to fix them)
+
+- **Trusting timestamps without skew allowance.** Fix: allow a 2–5 minute skew and enforce server-side clock checks.
+- **Storing secrets in plain Custom Settings.** Fix: use Protected Custom Metadata or encrypt at rest (Protected Custom Metadata is preferred for CI-safe secrets).
+- **Doing heavy work inside the REST method.** Fix: publish Platform Events and offload to Batch Apex for long-running or callout tasks.
+- **No replay protection.** Fix: require nonce + timestamp and store/reject duplicate nonces.
+- **Assuming signature format.** Fix: confirm with provider whether signature is hex/base64 and whether it's prefixed (sha256=...).
+
+## FAQ
+
+### How do I debug signature mismatches I see in logs?
+
+Capture the raw request body and headers (redact secrets) to reproduce the HMAC calculation locally. Confirm charset (UTF-8) and lack of trailing whitespace before hashing.
+
+### Can I use Platform Cache for nonce storage?
+
+Yes. Platform Cache reduces DML and latency, but ensure cache size and eviction policy match your throughput.
+
+### What limits should I watch for with Platform Events?
+
+Platform Events have per-24-hour and concurrent publishing limits; consult the Salesforce limits in the developer docs: https://developer.salesforce.com/docs and monitor publishing failures.
+
+### Can Experience Cloud host the webhook endpoint?
+
+Yes. Create a public page or authenticated page in your Experience site and expose an Apex REST endpoint. Site setup: Setup → Digital Experiences → All Sites → Builder. If the endpoint must be public, ensure strict signature verification and replay protection.
+
+### Should I return 200 for all webhook requests to avoid retries?
+
+Only return 200 after successful verification and enqueueing. For invalid signatures or replays, return 4xx so the sender stops retries. For temporary internal errors, return 5xx so the sender retries per their retry policy.
+
+Publish your webhook listener in a sandbox, run a load test, and schedule a Batch job for staged records as described above.
+
+Start by creating the small Protected Custom Metadata for the secret, an Apex REST class (paste the listener), and a Platform Event type; then wire a small Batch Apex job to process the staging table. 
