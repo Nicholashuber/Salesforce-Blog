@@ -1,0 +1,189 @@
+---
+title: "Fix: “Another Apex started trying to execute during active DB
+  transaction” — root causes and production fixes"
+date: 2026-08-03T09:00:00.000Z
+category: Administrator
+thumbnail: another-apex-started-trying-to-execute-during-active-db-transaction-fix.png
+tags:
+  - Apex
+  - Queueable
+  - Continuation
+  - Platform Events
+  - Flow
+  - LWC
+  - Debugging
+keywords:
+  - Another Apex started trying to execute during active DB transaction
+  - apex active db transaction error
+  - Apex started trying to execute during active DB transaction fix
+  - Continuation vs Queueable callout
+  - callout from trigger error Salesforce
+excerpt: "Short answer: the runtime exception “Another Apex started trying to
+  execute during active DB transaction” happens when code attempts to start
+  another Apex execution (future/queueable/batch/Platform Event handoff) while a
+  database transaction is still active. This playbook shows reproducible
+  scenarios, copy‑paste Apex fixes (Continuation, Queueable handoff, Platform
+  Event), Flow click paths, and test assertions so you can fix the error in
+  production."
+---
+
+# Fix: “Another Apex started trying to execute during active DB transaction” — root causes and production fixes
+
+Short answer: the runtime exception "Another Apex started trying to execute during active DB transaction" occurs when code attempts to start a second Apex execution context (enqueue a Queueable/@future, start a Batch, or implicitly kick off another Apex process) while the original database transaction is still open. Fix it by moving long-running work or callouts out of the active transaction: use Continuation for UI callouts, publish a Platform Event or enqueue a Queueable only after the transaction ends, or convert the Flow to an after-save offload.
+
+## What causes "Another Apex started trying to execute during active DB transaction" and why it matters?
+
+This exception surfaces when Salesforce prevents nested or concurrent Apex execution from inside an active DB transaction. Common triggers:
+
+- Synchronous UI callout code that attempts to enqueue a Queueable or @future in the same request.
+- Record-triggered Flow or trigger that calls an Apex method which starts another async job while DML is still pending.
+- Chained Queueables started improperly inside a transaction boundary.
+
+Why it matters: in synchronous contexts (LWC invoking @AuraEnabled Apex) the stack is a single transaction and you must not start a new Apex job before the first completes. In async-trigger contexts (after-save flows or triggers) you still have an active transaction; starting async incorrectly will throw the error instead of reliably handing off work.
+
+## How do I reproduce the error in a Dev Org?
+
+Reproduce recipe (fast):
+
+1. Setup → Apex Classes → New and paste this demo trigger + Apex that enqueues from trigger.
+
+```apex
+trigger DemoTrigger on Account (after insert) {
+    for (Account a : Trigger.new) {
+        // ❌ DO NOT do this inside a trigger if you also have DML pending
+        System.enqueueJob(new DemoQueueable(a.Id));
+    }
+}
+
+public class DemoQueueable implements Queueable {
+    public Id acctId;
+    public DemoQueueable(Id id){ acctId = id; }
+    public void execute(QueueableContext ctx){ /* work */ }
+}
+```
+
+2. Insert 1 Account in UI. The platform often throws: "Another Apex started trying to execute during active DB transaction" (depends on timing and if other async work is active).
+
+## How to fix this in an LWC that calls Apex which does a callout?
+
+Problem: your @AuraEnabled method does a synchronous callout and then tries to start async work in the same transaction. Use Continuation to make the outbound callout asynchronous from the Lightning thread, then enqueue any Queueable in the continuation callback.
+
+A minimal Continuation pattern:
+
+```apex
+public with sharing class ContinuationController {
+    @AuraEnabled(continuation=true)
+    public static Object makeCallout(String url) {
+        Continuation cont = new Continuation(40);
+        HttpRequest req = new HttpRequest();
+        req.setEndpoint(url);
+        req.setMethod('GET');
+        cont.addHttpRequest(req);
+        return cont;
+    }
+
+    // callback invoked when response arrives
+    @AuraEnabled
+    public static String handleResponse(String responseBody) {
+        System.enqueueJob(new MyQueueable(responseBody));
+        return 'enqueued';
+    }
+}
+```
+
+See the Continuation docs for details: [Salesforce Developer Docs](https://developer.salesforce.com/docs).
+
+## How to fix when a Record-Triggered Flow calls Apex that enqueues @future or Queueable?
+
+Flow runs inside a transaction. Avoid starting async Apex directly from an in-transaction Flow action. Options:
+
+- Change the Flow to After-Save and have it Create Records on a Platform Event object (Setup → Platform Events → New), then subscribe to that event with a trigger or an Apex subscriber.
+- Use an invocable Apex that publishes a Platform Event instead of enqueuing a job.
+
+Flow click-path to offload via Platform Event:
+
+1. Setup → Platform Events → New → create My_Integration__e with needed fields.
+2. Setup → Process Automation → Flows → New → Record-Triggered Flow (After Save).
+3. Add Create Records → choose My_Integration__e and map fields from the triggering record.
+4. Save/Activate. The event handler (Apex trigger or Platform Event subscriber) runs outside the original transaction.
+
+## How to write a Queueable handoff that won’t throw the error?
+
+Rules: call System.enqueueJob only after DML completes, or from an asynchronous context (for example, from a Batch execute or from Test.stopTest). If you must chain, enqueue from the Queueable.execute method (that's safe). Example:
+
+```apex
+public class Producer {
+    public static void safeEnqueue(Id recordId){
+        // buffer state and return; enqueue later from an async context or via Platform Event
+    }
+}
+
+public class ChainedQueueable implements Queueable {
+    public void execute(QueueableContext ctx){
+        // safe to enqueue another Queueable here
+        System.enqueueJob(new WorkerQueueable());
+    }
+}
+```
+
+## Continuation vs Queueable vs Platform Event vs AsyncApexJob — which to use?
+
+| Use case | Continuation | Queueable | Platform Event | AsyncApexJob (Batch) |
+|---|---:|---:|---:|---:|
+| UI HTTP callout and immediate UI response | Good — non-blocking for LWC/Visualforce | No | No | No |
+| Background processing with small payload and chaining | No | Good — simple, supports chaining | Possible (via subscriber) | Possible but heavier |
+| Durable, replayable handoff (guaranteed delivery) | No | No | Best — durable and decoupled | No |
+| Very large volumes / long processing with chunking | No | Limited | Good (with replay) | Best for batch transforms |
+
+Choose Continuation for UI callouts, Queueable for short background tasks and chaining, Platform Events for reliable decoupling, Batch (AsyncApexJob) for large-volume chunked work.
+
+## What you cannot do inside an active DB transaction (rules)
+
+- Start another Apex job (Queueable/@future/Batch) expecting it to run concurrently and succeed if the transaction is still open.
+- Perform mixed DML with setup objects and standard objects without separation.
+- Publish Platform Event and rely on immediate synchronous handling inside the same transaction (publish is durable and processed after commit).
+
+## Debug logs and root-cause checklist
+
+- Reproduce with DEBUG level: Setup → Environments → Logs → Debug Logs and set your user.
+- Look for the exact exception text: "Another Apex started trying to execute during active DB transaction".
+- Check for calls to System.enqueueJob, Database.executeBatch, or @future in the stack trace.
+- Search for Flow → Apex actions that return values and also perform DML.
+- Use Test.startTest / Test.stopTest to validate enqueued jobs in unit tests via Test.getEnqueuedJobs().
+
+Example test that asserts a Queueable was enqueued:
+
+```apex
+@isTest
+static void testEnqueue() {
+    Test.startTest();
+    // call method that should enqueue
+    Producer.doWork(myId);
+    Test.stopTest();
+    System.assertEquals(1, Test.getEnqueuedJobs().size());
+}
+```
+
+## Common mistakes and how to fix them
+
+- **Starting async Apex directly from a trigger or before commit** — publish a Platform Event or move to an after-save Flow then create the event. 
+- **Doing callouts synchronously from UI and then enqueuing work** — use Continuation to make the callout non-blocking and only enqueue in the callback. 
+- **Chaining Queueables from inside an active transaction** — enqueue further Queueables from within Queueable.execute, not from the calling transaction. 
+- **Relying on immediate Platform Event processing** — events are committed after transaction commit; design subscribers for eventual processing. 
+- **Tests that don’t assert enqueues** — use Test.getEnqueuedJobs() inside Test.startTest/Test.stopTest.
+
+## FAQ
+
+### Why does this error happen only sometimes and not every time?
+Timing: the platform blocks nested Apex when a second Apex execution would start before the first transaction commits. Race conditions and differing org load make it intermittent.
+
+### Can I catch this exception and retry?
+You can catch and log it, but retry inside the same transaction will fail. Instead publish a Platform Event or schedule a retry outside the transaction boundary.
+
+### Does using Queueable always cause this error?
+No. Queueable is safe when enqueued after commit or from an asynchronous context. The error appears only if you try to start it while the DB transaction is still active in a disallowed way.
+
+### Are there governor limits I should watch with these patterns?
+Yes. Continuation has a timeout and limited concurrent long‑running requests; Queueables count toward concurrent job and job chaining limits; Batch jobs have max number of jobs. See [Understanding Apex Transactions and Governor Limits in Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/understanding-apex-transactions-and-governor-limits-in-salesforce/index.mdx) and [Platform Events patterns](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/building-scalable-salesforce-integrations-with-platform-events/index.mdx) for deeper limit discussion.
+
+Replace the broken pattern in three steps: identify where async is started inside an active transaction, pick the appropriate offload (Continuation for UI callouts, Platform Event for durable handoff, Queueable for short background tasks), then add unit tests that assert the handoff (Test.getEnqueuedJobs or event subscription assertions).
