@@ -1,0 +1,191 @@
+---
+title: "Salesforce Inbox troubleshooting: fix OAuth, mailbox sync, and broken
+  automation"
+date: 2026-08-06T09:00:00.000Z
+category: Administrator
+thumbnail: salesforce-inbox-troubleshooting.png
+tags:
+  - Salesforce Inbox
+  - OAuth
+  - Mailbox Sync
+  - Troubleshooting
+  - Integrations
+keywords:
+  - Salesforce Inbox OAuth token expired
+  - Inbox mailbox sync failed
+  - Salesforce Inbox permissions Gmail Outlook
+  - Inbox automation stopped working
+  - troubleshoot Salesforce Inbox
+excerpt: "Salesforce Inbox troubleshooting: an actionable admin checklist to
+  resolve OAuth token expirations, mailbox sync failures, and Inbox automation
+  that stopped running. Includes reproduceable Dev org checks, SOQL/Apex
+  snippets, and recovery recipes."
+---
+
+# Salesforce Inbox troubleshooting: fix OAuth, mailbox sync, and broken automation
+
+Short answer
+
+If Inbox stops syncing or automation tied to inbox events stops firing, the most common causes are expired OAuth refresh tokens, tenant-level consent changes, mailbox mapping or permission-set gaps, and failing async jobs from the Inbox managed package. Start by checking Connected Apps OAuth usage and Named Credentials, then run targeted SOQL on AsyncApexJob and EmailMessage to find errors, re-authorize tenant/user tokens, and follow the bulk recovery recipes below.
+
+## What admin checks should I run first?
+
+1. Check tenant-level OAuth consent
+
+- Setup → Connected Apps OAuth Usage. Find the Inbox / Google / Microsoft entries and confirm the app shows recent activity and that OAuth scopes include email/calendar access (email, calendar, profile). Look for "insufficient_scope" or "access_denied" in the connected app details.
+- If you need tenant-wide consent, your org admin must approve the Inbox Connected App in Google Workspace / Microsoft 365 admin console.
+
+2. Verify Connected App detail and OAuth scopes
+
+- Setup → App Manager → find the Inbox connected app → View. Confirm OAuth Scopes include full access required by Inbox (check for email/calendar scopes). If the app requires "Admin approved users are pre-authorized," confirm your users are covered.
+
+3. Confirm Named Credentials and Remote Sites
+
+- Setup → Security → Named Credentials. Find Inbox-related named credentials used for Exchange/Gmail callouts. Confirm the URL, Identity Type, and Authentication Protocol. If you see expired credentials here, reconfigure.
+
+4. Check Permission Sets and mailbox permissions
+
+- Setup → Users → Permission Sets → open the Inbox permission set (or the package's assigned set). Ensure "Connected App Access" and any API permissions are granted. Also verify users have the package's "Inbox" permission set assigned.
+- For Gmail/Outlook: confirm mailbox admin settings allow third-party access and tokens haven't been revoked in the mailbox provider admin console.
+
+## How do I reproduce and inspect token expiration in a Dev org?
+
+1. Reproduce by revoking a token
+
+- Ask a test user to connect Inbox. Then revoke the refresh token from the Gmail or Microsoft account (Admin Console → Security → Third-party app access → Revoke). This reproduces an expired refresh token scenario for that user.
+
+2. Inspect the resulting failures
+
+- Setup → Debug Logs: add the test user and reproduce a sync. Search the debug log for common OAuth error strings below.
+
+Common OAuth error strings to grep for in logs
+
+- "invalid_grant"
+- "invalid_client"
+- "insufficient_scope"
+- "access_denied"
+- "invalid_request"
+
+These are returned by the identity provider (Google/Microsoft) and appear in debug logs or in the Connected App OAuth Usage details.
+
+## What SOQL and Apex checks quickly surface failing automation and mail issues?
+
+Run these SOQL queries in Developer Console → Query Editor or in anonymous Apex to find failed async work and recent email activity.
+
+```sql
+SELECT Id, JobType, Status, NumberOfErrors, ExtendedStatus, CreatedDate
+FROM AsyncApexJob
+WHERE Status = 'Failed'
+ORDER BY CreatedDate DESC
+LIMIT 200
+```
+
+```sql
+SELECT Id, Subject, FromAddress, ToAddress, MessageDate, RelatedToId
+FROM EmailMessage
+WHERE MessageDate = LAST_N_DAYS:30
+ORDER BY MessageDate DESC
+LIMIT 200
+```
+
+A small utility Apex class to pull recent failed jobs (runs in anonymous exec):
+
+```apex
+public with sharing class InboxTroubleshooter {
+  public static List<AsyncApexJob> findFailedAutomation() {
+    return [SELECT Id, JobType, Status, NumberOfErrors, ExtendedStatus, CreatedDate
+            FROM AsyncApexJob
+            WHERE Status = 'Failed'
+            ORDER BY CreatedDate DESC
+            LIMIT 200];
+  }
+}
+// Run in Execute Anonymous:
+// List<AsyncApexJob> fails = InboxTroubleshooter.findFailedAutomation();
+// System.debug(fails);
+```
+
+The ExtendedStatus and NumberOfErrors fields often contain the package error and the text you can paste into a support case or use to grep in logs.
+
+## How do I triage a sync/send failure? A quick checklist
+
+- Confirm user token: ask the user to reconnect Inbox (Inbox widget -> Settings -> Reconnect) and test a one-off send.
+- Tenant consent: if multiple users fail, check tenant-level consent in Google/Microsoft admin and Connected Apps OAuth Usage in Salesforce.
+- Named credentials: verify expiry and correct endpoints.
+- Permission sets: ensure the Inbox permission set is assigned and permission set license is active for the user.
+- Async failures: run the AsyncApexJob SOQL above; if failures reference the Inbox package Apex classes, collect ExtendedStatus and raise with Salesforce Support.
+- EmailMessage audit: query EmailMessage for missing/failed sends and inspect related tasks or error messages in the Activity Timeline.
+
+## Recipes to recover automation safely (re-authorize, re-map mailboxes, bulk re-enable)
+
+1. Re-authorize tenant or user tokens
+
+- Tenant-level: coordinate with your Google Workspace or Microsoft 365 admin to re-grant the Inbox connected app the required scopes.
+- Per-user: user opens Inbox, goes to Settings → Connected Accounts → Reconnect, completes OAuth flow.
+
+2. Re-map user mailbox (when mailbox identity changed)
+
+- If users changed mailbox email addresses, update the user's email in Salesforce to match the mailbox or re-run the Inbox mailbox mapping flow in the Inbox admin UI.
+
+3. Bulk re-enable sync for users (UI + programmatic)
+
+- If only a handful of users, re-enable via Setup → Email → Email Integration and Sync and toggle their sync settings.
+- For bulk operations, use an org-preferred approach: notify users to reauthorize, or use a supported automation path provided by the Inbox managed package (contact ISV support for bulk API operations). Avoid scripting updates to undocumented package custom objects; escalate to Salesforce/ISV when a tenant consent reset is required.
+
+## How to make Inbox automation more resilient
+
+- Fail-safe requeue: design your automation (Flow or Apex) so an initial failure publishes a record to a custom Platform Event or a custom queue object. A subscriber job can re-attempt processing when external OAuth tokens are re-established.
+- Idempotent processing: ensure your automation can be retried without duplicate side-effects.
+- Health monitoring: schedule a daily job that queries AsyncApexJob for failures and emails the integration owner with ExtendedStatus details.
+
+Example Queueable skeleton to implement a requeue worker:
+
+```apex
+public class InboxRequeueJob implements Queueable {
+  private List<Id> recordIds;
+  public InboxRequeueJob(List<Id> ids){ this.recordIds = ids; }
+  public void execute(QueueableContext ctx){
+    // Call your package-safe processing method here
+    System.debug('Reprocessing records: ' + recordIds);
+    // Example: MyInboxProcessor.process(recordIds);
+  }
+}
+```
+
+Pair the above with a Flow or Platform Event subscriber that identifies failed records and enqueues the job in small batches.
+
+## Common mistakes (and how to fix them)
+
+- **Mistake:** Re-authorizing one user instead of checking tenant consent. Fix: If multiple users fail, verify tenant-level consent in your Google/Microsoft admin console and in Setup → Connected Apps OAuth Usage.
+- **Mistake:** Updating package objects directly to "fix" sync. Fix: Don’t update undocumented package records; use supported admin tools or contact the ISV/Salesforce Support.
+- **Mistake:** Re-enabling automation without confirming mailbox tokens are valid. Fix: Re-authorize mailboxes first, then re-enable automation and watch AsyncApexJob for new failures.
+- **Mistake:** Ignoring ExtendedStatus in AsyncApexJob. Fix: Copy ExtendedStatus into your triage notes — it contains the underlying callout or package error.
+- **Mistake:** Bulk changing user emails without remapping mailboxes. Fix: Remap mailboxes via the Inbox admin UI or instruct users to reconnect to avoid orphaned mailboxes.
+
+## FAQ
+
+### Why does Connected Apps OAuth Usage show "invalid_grant"?
+
+"invalid_grant" usually means the refresh token was revoked or expired at the identity provider (Google/Microsoft). Ask the user to re-authenticate or check tenant consent.
+
+### How do I tell if Inbox failures are from Salesforce or the mailbox provider?
+
+Look in AsyncApexJob. If ExtendedStatus contains identity-provider error strings (invalid_grant, insufficient_scope), it’s on the mailbox/provider side. If ExtendedStatus references package exception types, collect logs and open a support case.
+
+### Can I bulk-revoke and re-authorize all users?
+
+You can bulk-revoke from the mailbox provider (Google Workspace / Microsoft 365 admin) but re-authorization is typically per-user unless tenant-wide consent is used. Plan communications before revoking tokens.
+
+### Which logs should I grep for when triaging?
+
+Use Debug Logs for the user and search for the OAuth error strings above. Query AsyncApexJob for Failed jobs and copy ExtendedStatus. Query EmailMessage for recent MessageDate entries tied to failed sends.
+
+### When should I contact Salesforce/ISV support?
+
+Contact support if AsyncApexJob failures reference managed-package Apex classes or if tenant-level re-consent is required but your admin consoles show everything correct.
+
+For more on building resilient integrations, see the guide on Building Scalable Salesforce Integrations with Platform Events and our step-by-step Inbox setup guide for initial baseline checks.
+
+Run the checks above in a Developer Edition sandbox first, re-authorize one test user, and confirm sync and automation resume before rolling changes to production.
+
+
