@@ -1,0 +1,209 @@
+---
+title: "Pardot implementation checklist for Salesforce-connected orgs: a
+  production-ready playbook"
+date: 2026-08-10T09:00:00.000Z
+category: Marketing
+thumbnail: pardot-implementation-checklist-salesforce-connected-orgs.png
+tags:
+  - Pardot
+  - Account Engagement
+  - Marketing
+  - Salesforce integration
+  - Data mapping
+  - GDPR
+keywords:
+  - Pardot implementation
+  - Pardot checklist
+  - Pardot connector
+  - Pardot field mapping
+  - Pardot tracking code
+  - Pardot scoring grading
+  - Pardot import strategy
+  - Account Engagement implementation
+excerpt: A concise, step-by-step Pardot implementation checklist for
+  Salesforce-connected orgs, covering connector user and API limits, prospect
+  model and field mapping, tracking code, scoring & grading, automation choices,
+  batch imports, GDPR handling, testing, rollback, and post-live monitoring.
+  Includes exact Setup paths, SOQL/API snippets, test cases, and recommended
+  defaults for medium-to-large orgs.
+---
+
+# Pardot implementation checklist for Salesforce-connected orgs: a production-ready playbook
+
+Short answer
+
+This checklist gets a Salesforce-connected Pardot (Account Engagement) instance production-ready. Follow the connector and API checks, prospect model and field mapping, cookie/tracking setup, scoring & grading defaults, automation choices, import strategy, GDPR/opt-out handling, test cases, rollback steps, and post-live metrics below. Each step includes click-paths, SOQL/API snippets, and minimum test cases.
+
+## How do you set up the connector user and verify API limits?
+
+1. Create a dedicated connector user in Salesforce.
+   - Setup → Users → Users → New. Name: Pardot Connector (or similar). Email: shared monitored inbox. Check: Profile with API Enabled and a custom Permission Set granting: API Enabled, Modify All Data (if necessary for sync), Manage Pardot (if using Pardot permissions).
+   - Setup → Users → Permission Sets → New to create a minimal connector permission set.
+
+2. Add the connector user to Pardot.
+   - Pardot (Account Engagement) → Pardot Settings → Connectors → Salesforce (or Marketing Cloud Account Engagement app) → Configure Connector. Use the dedicated Salesforce user credentials.
+
+3. Verify API usage and limits (daily and concurrent).
+
+   To check org limits via REST:
+
+   ```bash
+   # get limits (replace token/instance)
+   curl -H "Authorization: Bearer $SF_ACCESS_TOKEN" https://yourInstance.salesforce.com/services/data/v57.0/limits
+   ```
+
+   To verify the connector user has API access with SOQL:
+
+   ```sql
+   SELECT Id, Username, ProfileId, PermissionsApiEnabled FROM User WHERE Username = 'pardot.connector@yourdomain.com'
+   ```
+
+   Minimum test cases
+   - Connector user logs into Pardot and shows green (connected) status.
+   - Create a lead in Salesforce as the connector user and confirm it syncs to Pardot within expected window.
+
+   Recommended defaults (medium-to-large org)
+   - Use a single dedicated connector user per Salesforce org / Pardot business unit.
+   - Monitor API usage daily; keep a 10% headroom from daily limit.
+
+   Reference: [Salesforce Developer Docs on REST Limits](https://developer.salesforce.com/docs)
+
+## How should you model prospects and map fields between Pardot and Salesforce?
+
+1. Design the prospect model.
+   - Decide primary key: Email as unique identifier in Pardot; map to Lead and Contact in Salesforce.
+   - Create custom fields in Salesforce ahead of Pardot mapping (Setup → Object Manager → Lead/Contact → Fields & Relationships → New).
+
+2. Field mapping rules (direction and sync priority).
+   - For each field define: source of truth (Salesforce or Pardot), sync direction (Salesforce → Pardot, Pardot → Salesforce, bidirectional), and conflict resolution.
+   - Map opt-outs: Pardot unsubscribe → Lead/Contact: HasOptedOutOfEmail (Do Not Email) and a custom Last_Unsubscribe_Date__c.
+
+3. Implement the mappings in Pardot.
+   - Pardot → Admin → Configure Fields → Prospect Fields → Map to Salesforce fields.
+
+4. SOQL checks to confirm mapping exists:
+
+   ```sql
+   SELECT Id, Email, HasOptedOutOfEmail, Pardot_Prospect_Id__c FROM Lead WHERE Pardot_Prospect_Id__c != NULL LIMIT 10
+   ```
+
+   Minimum test cases
+   - Update a mapped field in Salesforce and confirm it updates in Pardot (and vice versa for bidirectional fields).
+   - Verify opt-out flows set HasOptedOutOfEmail on the Lead or Contact.
+
+## How do you configure cookies, tracking code, and engagement history storage?
+
+1. Add the tracking code to your web properties.
+   - In Pardot: Marketing → Kiosk/Tracking → Tracking Code (or Pardot Settings → Tracking). Copy the JS snippet and add to site header or via tag manager.
+   - Place on every page you want to track, including gated landing pages.
+
+2. Configure cookies and domain tracking.
+   - Ensure the cookie domain matches your top-level domain to avoid cross-subdomain issues.
+   - Add tracked domains in Pardot: Marketing → Domain Management → Add Domain.
+
+3. Engagement history storage strategy
+   - Keep detailed engagement in Pardot and push summarized activities to Salesforce (e.g., last 5 activities, last page view date, score change date). Avoid pushing every activity to Salesforce unless you have a clear retention/volume strategy.
+
+   Recommended defaults (medium-to-large org)
+   - Retain detailed activity in Pardot 730 days; push summary fields to Salesforce (Last_Engagement_Date__c, Pardot_Score__c).
+
+   Minimum test cases
+   - Visit a tracked page as a new browser (incognito) and ensure a new prospect is created or visit is recorded.
+   - Submit a tracked form and confirm form handler fields appear on the prospect and sync to Salesforce.
+
+## Which automation tools should you use: Automation Rules, Segmentation Rules, or Engagement Studio?
+
+- Use Automation Rules for record-level changes and immediate actions (tagging, scoring adjustments, field updates).
+- Use Segmentation Rules for one-off list population tasks.
+- Use Engagement Studio for multi-step nurture programs with waits, branching, and re-entry rules.
+
+Implementation guidance
+
+- Map each Pardot automation to a named business requirement and include an owner and kill-switch (a single toggle field or campaign-level suppression list).
+- Document suppression lists: Suppressed Reason = Unsubscribed, DoNotContact, Internal.
+
+Minimum test cases
+- Automation Rule: apply a rule that adds a prospect to List A when they submit Form X; validate within 15 minutes.
+- Engagement Studio: run a short test flow with wait nodes and conditional splits; confirm expected emails and pathing.
+
+## How to plan batch imports, GDPR/data retention, and unsubscribe handling?
+
+1. Import strategy
+   - Use a staging CSV with canonical columns (Email, FirstName, LastName, SF Lead/Contact ID, Pardot_Prospect_Id__c).
+   - Use the [Salesforce Data Import Wizard or Data Loader] depending on volume. See internal guide: "Salesforce Data Import Wizard vs Data Loader: What Every Admin Should Know" for choice criteria.
+
+   Example CSV mapping snippet (first row = header):
+
+   ```csv
+   Email,FirstName,LastName,Company,LeadSource,Pardot_Prospect_Id__c
+   ```
+
+2. GDPR and retention
+   - Map consent fields (e.g., GDPR_Consent__c) and store consent timestamp. Use Pardot lists/segments to exclude non-consenting prospects.
+   - For unsubscribe, map Pardot unsubscribe to Salesforce HasOptedOutOfEmail and run a nightly job to reconcile.
+
+Minimum test cases
+- Import 100 records in staging; confirm de-duplication, matching to existing SF records, and that mapped fields populate.
+- Execute an unsubscribe in Pardot and verify Salesforce HasOptedOutOfEmail is set within sync window.
+
+3. Recommended default values
+- MQL score threshold: start at 50, adjust after 6 weeks based on conversion metrics.
+- Engagement Studio re-entry cooldown: 90 days.
+
+## How do you test, stage rollback steps, and monitor after go-live?
+
+Test plan (minimum):
+- Sandbox staging: Use a Salesforce sandbox and a separate Pardot business unit or staging Pardot account where possible.
+- Test cases: connector auth, create/update lead/contact sync, form submission, scoring change, unsubscribe, automation path, tracked page visit, list segmentation accuracy.
+- Load test: run a controlled bulk import (10k rows) in staging and monitor sync performance.
+
+Rollback steps (fast path)
+1. Disable all Engagement Studio programs and Automation Rules (Pardot → Automation).
+2. Remove or replace tracking code from site header to stop new prospect creation.
+3. Revert field mappings or restore from a pre-launch export CSV.
+4. If necessary, disable the Salesforce connector (Pardot Settings → Connectors → Salesforce → Pause/Disable).
+
+Post-live monitoring (first 30 days)
+- Daily: connector status, API usage, queue lengths for syncs, email deliverability rates, and unsubscribe counts.
+- Weekly: scoring distribution, MQL to SQL conversion, and Engagement Studio path drop-offs.
+
+Key SOQL / API checks
+
+```sql
+SELECT Id, Email, Pardot_Prospect_Id__c, HasOptedOutOfEmail FROM Lead WHERE Pardot_Prospect_Id__c != NULL LIMIT 50
+```
+
+```bash
+# check limits
+curl -H "Authorization: Bearer $SF_ACCESS_TOKEN" https://yourInstance.salesforce.com/services/data/v57.0/limits
+```
+
+## Common mistakes (and how to fix them)
+
+- **Using a full-access admin as the connector user.** Fix: Create a dedicated connector user with a minimal permission set that only includes what the connector needs.
+- **Pushing every Pardot activity to Salesforce.** Fix: Push only summary fields and high-value activities; keep bulk activity in Pardot to control storage and API use.
+- **No unsubscribe mapping to Salesforce.** Fix: Map Pardot unsubscribe to HasOptedOutOfEmail and run nightly reconciliation imports.
+- **Skipping a rollback plan.** Fix: Predefine an immediate rollback checklist (disable automations, pause connector, remove tracking code) and store it in your runbook.
+- **Not testing at scale.** Fix: Do a controlled import and automation run at projected peak volume in staging.
+
+## FAQ
+
+### What is the minimum permission the Salesforce connector user needs?
+The connector user needs API Enabled and access to Lead and Contact objects and any custom fields you map. Use a Permission Set to grant only required object and field-level access.
+
+### Can I use a sandbox for Pardot testing?
+Pardot doesn’t automatically mirror Salesforce sandboxes; use a separate Pardot business unit or a dedicated staging Pardot account. Always test connector behavior with a sandbox Salesforce org before production.
+
+### How fast do Pardot-to-Salesforce syncs occur?
+Sync latency depends on queue length and your Pardot edition; immediate changes often appear within minutes but bulk imports and high-volume events can queue. Monitor connector queues after large imports.
+
+### Should I push raw page views to Salesforce?
+No. Push summarized engagement metrics and high-value events (form submit, download, webinar attend). Storing raw page views in Salesforce creates volume and API pressure.
+
+### Where can I find Pardot API documentation and Salesforce limits?
+Use Salesforce Developer Docs for API references and limits: https://developer.salesforce.com/docs.
+
+Final step: pick a go-live date, schedule a 72-hour monitoring window with your ops team, and run the full test-suite above at least once in staging before flipping production.
+
+Related reading: "Maximizing Marketing Potential: Setting Up Pardot with Salesforce" and "Salesforce Data Import Wizard vs Data Loader: What Every Admin Should Know".
+
