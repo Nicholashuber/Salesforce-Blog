@@ -1,0 +1,239 @@
+---
+title: "Duplicate management Salesforce at scale: matching rules, batch Apex
+  dedupe jobs, and when to buy"
+date: 2026-08-17T09:00:00.000Z
+category: Administrator
+thumbnail: duplicate-management-salesforce-at-scale.png
+tags:
+  - duplicate management
+  - apex
+  - batch apex
+  - admin
+  - data management
+keywords:
+  - duplicate management salesforce at scale
+  - salesforce dedupe batch apex
+  - matching rules duplicate rules
+  - salesforce duplicate management at scale
+  - bulk dedupe salesforce
+excerpt: "Duplicate management Salesforce at scale: a pragmatic decision
+  framework plus three ready-to-run solutions — matching rules click-path, a
+  bulk-safe Apex dedupe batch job, and vendor selection criteria to reduce
+  duplicate load quickly."
+---
+
+# Duplicate management Salesforce at scale: matching rules, batch Apex dedupe jobs, and when to buy
+
+Short answer
+
+Duplicate management Salesforce at scale requires three things: (1) production-safe matching rules + duplicate rules (Setup → Duplicate Management) to stop new duplicates, (2) a bulk-safe Batch Apex job to group and either flag or merge historical duplicates, and (3) a clear buy-vs-build decision based on record volume, SLA, and merge complexity. Below are step-by-step matching-rule click paths, a tested Batch Apex implementation you can run in a sandbox, and a vendor decision framework.
+
+## How do I create Matching Rules and Duplicate Rules that will scale?
+
+Follow this exact Setup path and configuration to get real-time blocking/alerting for Leads/Contacts/Accounts.
+
+1. Create a matching rule (example: Contacts by Email).
+   1. Setup → Duplicate Management → Matching Rules → New.
+   2. Object: Contact. Name: Contact_Email_Exact.
+   3. Add field: Email — Matching Method: Exact. Add secondary fields if needed (LastName Exact, Phone Fuzzy).
+   4. Save, then click Activate. Activated matching rules are required for Duplicate Rules to reference them.
+
+2. Create the Duplicate Rule.
+   1. Setup → Duplicate Management → Duplicate Rules → New Rule.
+   2. Object: Contact. Name: Contact_Email_Duplicate_Rule.
+   3. Matching Rule: Contact_Email_Exact (select the one you activated).
+   4. Actions: On Create — Alert and Report (recommended) or Block (only if business accepts strict blocking).
+   5. Record-Level Security: Select whether to bypass sharing (usually leave unchecked; duplicates should respect sharing).
+   6. Save and Activate.
+
+3. Test in a sandbox with imports and UI edits.
+   - Use Data Loader to insert small batches (50–200) of Contacts w/ duplicated emails and verify the Duplicate Rule triggers.
+   - Check Duplicate Record Sets in Setup (Duplicate Record Sets & Duplicate Record Items are created when you choose Report/Alert).
+
+Why this pattern scales: matching rules prevent new duplicates in real time (cheap), while Duplicate Rules centralize how matches are handled; historical cleanup is done separately by a batch process to avoid API throttling and avoid large synchronous work.
+
+(If you need a refresher on duplicate rule basics, see our hands-on guide: [Salesforce Duplicate Management: A Hands-On Guide for Admins](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/administrator/salesforce-duplicate-management-a-hands-on-guide-for-admins/index.mdx).)
+
+## How to run a bulk-safe Apex dedupe job (production-ready)
+
+This Batch Apex example finds Contact duplicates by exact Email, groups them, and then either (A) flags duplicates for manual reconciliation or (B) attempts an automated merge for simple cases. Test in a sandbox and run with a small batch size first.
+
+Notes before you run:
+- Batch Apex chunk size default is 200; you can call Database.executeBatch(batch, 100) to limit governor pressure.
+- Merge is a DML statement (merge masterRecord duplicateRecord;) and requires Delete permission on merged records.
+- Only merge when your business rules are clear (same owner, record type compatibility, related child records handling).
+
+Apex Batch (Contacts by Email):
+
+```apex
+// apex
+public with sharing class ContactDedupeBatch implements Database.Batchable<String>, Database.Stateful {
+    // Switch to true to perform an actual merge. Start with false to only create review tasks.
+    public Boolean performMerge = false;
+
+    public ContactDedupeBatch(Boolean performMerge) {
+        this.performMerge = performMerge;
+    }
+
+    public Iterable<String> start(Database.BatchableContext bc) {
+        List<String> emails = new List<String>();
+        // Aggregate on Email to find duplicate keys
+        for (AggregateResult ar : [
+            SELECT Email e, COUNT(Id) cnt
+            FROM Contact
+            WHERE Email != null
+            GROUP BY Email
+            HAVING COUNT(Id) > 1
+        ]) {
+            emails.add((String)ar.get('e'));
+        }
+        return emails;
+    }
+
+    public void execute(Database.BatchableContext bc, List<String> scope) {
+        if (scope.isEmpty()) return;
+
+        // Query all contacts for this batch of emails
+        List<Contact> contacts = [
+            SELECT Id, Email, FirstName, LastName, Phone, OwnerId, CreatedDate
+            FROM Contact
+            WHERE Email IN :scope
+            ORDER BY Email, CreatedDate
+        ];
+
+        Map<String, List<Contact>> groups = new Map<String, List<Contact>>();
+        for (Contact c : contacts) {
+            groups.computeIfAbsent(c.Email, k -> new List<Contact>()).add(c);
+        }
+
+        List<Task> reviewTasks = new List<Task>();
+        Integer mergesAttempted = 0;
+
+        for (String key : groups.keySet()) {
+            List<Contact> members = groups.get(key);
+            // choose master: most filled fields (simple heuristic) then earliest CreatedDate
+            members.sort((a,b) -> {
+                Integer aScore = (a.FirstName==null?0:1) + (a.LastName==null?0:1) + (a.Phone==null?0:1);
+                Integer bScore = (b.FirstName==null?0:1) + (b.LastName==null?0:1) + (b.Phone==null?0:1);
+                if (aScore != bScore) return bScore - aScore; // higher score first
+                return a.CreatedDate.compareTo(b.CreatedDate);
+            });
+
+            Contact master = members[0];
+            for (Integer i = 1; i < members.size(); i++) {
+                Contact dup = members[i];
+
+                if (performMerge) {
+                    try {
+                        // merge master with duplicate (Apex merge statement)
+                        merge master dup;
+                        mergesAttempted++;
+                    } catch (Exception ex) {
+                        // fallback: create a review task if merge fails
+                        reviewTasks.add(new Task(
+                            Subject = 'Dedupe merge failed',
+                            WhatId = master.Id,
+                            Description = 'Merge failed for duplicate Contact Id: ' + dup.Id + '\nError: ' + ex.getMessage(),
+                            Priority = 'High'
+                        ));
+                    }
+                } else {
+                    // create Task so a user can review the duplicate pair
+                    reviewTasks.add(new Task(
+                        Subject = 'Review duplicate by Email',
+                        WhatId = master.Id,
+                        Description = 'Possible duplicate Contact. Master: ' + master.Id + ' Duplicate: ' + dup.Id + '\nEmail: ' + key,
+                        Priority = 'Normal'
+                    ));
+                }
+            }
+        }
+
+        if (!reviewTasks.isEmpty()) Database.insert(reviewTasks);
+    }
+
+    public void finish(Database.BatchableContext bc) {
+        // optional: send an email, post to Chatter, or create an Audit record
+    }
+}
+```
+
+How to run in a sandbox:
+
+1. Deploy the class (API v54+ recommended).
+2. Open Developer Console → Execute Anonymous and run:
+
+```apex
+// run as dry run (no merges)
+Database.executeBatch(new ContactDedupeBatch(false), 100);
+
+// to actually attempt merges (test this on a small subset first):
+// Database.executeBatch(new ContactDedupeBatch(true), 50);
+```
+
+For larger orgs, schedule the batch nightly with System.schedule or orchestrate from a scheduled Apex class. See the batch patterns article for more on scale: [Automating Processes with Apex Batch Jobs in Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/automating-processes-with-apex-batch-jobs-in-salesforce/index.mdx).
+
+Governor-limit and permission notes
+
+- Batch Apex gives you fresh governor limits per execute() chunk; keep chunk size between 50–200 depending on merges and child relationships.
+- Merge DML consumes DML rows. Monitor total DML rows per transaction and use smaller chunk sizes when merging many records.
+- Merge requires Delete permission for the running user and will fail if child records or triggers block deletes.
+
+## When should you buy a third-party deduplication tool?
+
+Buy when any of these are true for your business:
+
+- You have multiple millions of records and need real-time dedupe across many objects (Accounts, Contacts, Leads, Person Accounts) with minimal false positives.
+- You need advanced matching (fuzzy name matching, address normalization, cross-object linking — e.g., Accounts+Contacts+Custom customer objects) and a UI for business users to review/merge at scale.
+- You require SLA'd support, audit trails for merges, and undo/rollback capabilities beyond what you can build quickly in-house.
+- Your org needs connectors (Marketing Cloud, Pardot, external CDPs like Data Cloud) with dedupe sync rules built-in.
+
+Buy only after validating:
+
+- A vendor can process your peak daily throughput in a sandbox or proof-of-concept.
+- They expose an API that respects your API limits and can be run incrementally.
+- Pricing fits long-term: vendor costs often scale with record volume and with the number of merge operations.
+
+If your needs are limited to simple exact-match rules and nightly cleanup, build-first is usually cheaper and faster.
+
+## Best practices for duplicate management at scale
+
+- Prevent new duplicates first: use Matching Rules + Duplicate Rules for the most common keys (Email, National ID, External ID).
+- Keep historical cleanup asynchronous: do not attempt large merges in UI-triggered flows.
+- Use an immutable audit trail: store DuplicateRecordSet/DuplicateRecordItem or a custom Merge_Audit__c record for every automated merge.
+- Test merges on a representative subset with a sandbox copy of production data.
+- Respect field-level security and sharing; merges performed as a system user may create compliance issues.
+
+## Common mistakes (and how to fix them)
+
+- **Merging without testing the decision logic.** Fix: always dry-run with performMerge=false and inspect created review tasks.
+- **Running large merges in a single transaction.** Fix: use Batch Apex with chunk sizes 50–200 and monitor DML usage.
+- **Blocking records that need to sync to external systems.** Fix: set Duplicate Rule action to Alert + Report, not Block, if downstream systems accept duplicates.
+- **Assuming exact email always means same person.** Fix: add secondary checks (LastName, AccountId for Contacts, or a human-review step) before automatic merges.
+- **Relying on a single matching key.** Fix: maintain multiple matching rules (email exact, phone normalized, external_id) and apply them strategically.
+
+## FAQ
+
+### How do matching rules differ from duplicate rules in Salesforce?
+
+Matching Rules define how two records are compared (which fields and match method). Duplicate Rules define what happens when a match is found (Block, Alert, Report) and which matching rule to use.
+
+### Can I merge records in Batch Apex for Accounts and Contacts?
+
+Yes. The Apex merge statement supports Accounts, Contacts, and Leads, but merging requires Delete permission and careful handling of related child records; always test in sandbox.
+
+### Will Batch Apex hit API governor limits for millions of records?
+
+Batch Apex runs with fresh governor limits per execute() chunk. Use appropriate chunk sizes (50–200) and avoid expensive operations inside loops to stay within limits.
+
+### Should I block duplicates in the UI or just alert users?
+
+Start with Alert + Report. Blocking can disrupt integrations and user workflows. Move to Block only after proving the matching criteria have acceptably low false positives.
+
+### Where can I find Salesforce developer guidance on batch jobs and duplicate management?
+
+See the Salesforce Developer Docs on Batch Apex and data management: https://developer.salesforce.com/docs.
+
+Run the code and matching rules in a sandbox, confirm results on a representative subset, then roll out to production with a scheduled, monitored plan.
+
+
