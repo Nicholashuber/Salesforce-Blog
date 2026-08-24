@@ -1,0 +1,173 @@
+---
+title: "Salesforce dashboard performance: Why dashboards time out and how to
+  make them fast again"
+date: 2026-08-24T09:00:00.000Z
+category: Administrator
+thumbnail: salesforce-dashboard-performance-timeouts-fixes.png
+tags:
+  - Reports
+  - Dashboards
+  - Performance
+  - Admins
+  - Apex
+  - Data Cloud
+keywords:
+  - salesforce dashboard performance
+  - dashboard timeout
+  - report performance
+  - report optimization
+  - pre-aggregate reports
+  - big objects salesforce
+  - reporting snapshot
+excerpt: "Fix salesforce dashboard performance that times out in Production:
+  identify slow components, apply three refactors (pre-aggregate, Big
+  Objects/Data Cloud, summary tables), and run 60‑minute fixes."
+---
+
+# Salesforce dashboard performance: Why dashboards time out and how to make them fast again
+
+Short answer: Dashboards time out when one or more report components run expensive queries or row-level calculations that exceed the report execution window or hit resource limits. Diagnose slow components with dashboard debug tools and the report run history, then apply quick fixes (simpler filters, remove joined reports, replace buckets) and longer-term refactors (pre-aggregate via Reporting Snapshots or Batch Apex, move massive historical sets to Big Objects/Data Cloud, or publish summary tables). The steps below will get you actionable results in 60 minutes and a plan to prevent regressions.
+
+## How do dashboards actually time out and return partial data?
+
+A dashboard component is a view onto a report. When that report executes it runs SOQL-like queries on your org’s reporting engine. Heavy components cause one of three outcomes:
+
+- The report exceeds the execution window and returns an error or partial results. This most often looks like a blank component or a "This dashboard has expired"/timeout UI.
+- The report hits internal limits (complex joins, many row-level formulas, cross-filters), so Salesforce returns a partial dataset.
+- The dashboard refresh process fails silently when multiple heavy components run in parallel.
+
+Common heavy patterns: joined reports, many bucket fields or row-level formulas, cross-object formulas evaluated at runtime, very wide date ranges, and filters that prevent index usage (e.g., TEXT(field) = 'x').
+
+## How can you identify the slow dashboard components now?
+
+1. Open the dashboard, click Edit, then click the component's report link to open the underlying report.
+2. Run the report and check the UI for warnings ("Report performance degraded") or long spinner time. Note which components are slow.
+3. Use the report run history: Reports → [Your Report] → Run → click the down arrow → "View Run Details" to see runtime and row counts.
+4. For an org-wide view, enable and inspect the [Report Execution Log via Event Monitoring or query the AsyncApexJob/ReportExport objects].
+
+Quick rule: if a single report takes >30–60 seconds in Production, it will likely fail as a dashboard component when several run together.
+
+## What 60‑minute fixes can you apply right now?
+
+1) Reduce breadth of data
+
+- Edit the report: tighten date filters (e.g., Last 30 Days vs All Time), add selective filters (indexed fields like CreatedDate, OwnerId).
+- Replace Contains/Starts With text filters with picklists or exact matches where possible.
+
+2) Replace bucket fields and row-level formulas
+
+- If a bucket groups a TEXT field into many categories, instead create a formula field or a picklist on the object and populate it via Flow or before-save Flow (Setup → Object Manager → [Object] → Fields & Relationships → New). Buckets are calculated at run-time; formulas can be indexed when stored.
+
+3) Split joined reports and multi-block components
+
+- Joined reports run multiple subqueries and are slow. Replace a single joined report component with multiple components that point at simple summary reports.
+
+4) Change dashboard behavior
+
+- Edit the dashboard → click the gear icon → set "View Dashboard As" to a fixed running user with access and smaller visibility if security skew is causing extra processing.
+- Reduce dashboard filter values or remove wide "All" filters.
+
+5) Schedule refresh instead of live refresh
+
+- Open dashboard → Edit → Subscribe (or Schedule Refresh) to precompute images/tiles off-peak. That prevents interactive timeouts for viewers.
+
+These steps often get a dashboard back under control within an hour.
+
+## Which refactors cut run-time for large-scale dashboards?
+
+Comparison of long-term approaches:
+
+| Option | When to use | Pros | Cons |
+|---|---:|---|---|
+| Reporting Snapshots (Admin) | You need daily/weekly aggregates of report data | Low-code; works with standard reports | Snapshot retention and storage planning needed |
+| Batch Apex pre-aggregation | Complex aggregates, many dimensions, or custom rollups | High control; can aggregate into a custom summary object and add indexes | Requires Apex, testing, scheduler or queueable flow |
+| Big Objects / Data Cloud | Very large historical sets (hundreds of millions of rows) | Scales to massive volumes | Adds complexity; often needs Data Cloud/ETL work |
+
+Concrete Batch Apex pattern (aggregate counts to Summary__c):
+
+```apex
+// apex
+public class AccountOpportunitySummaryBatch implements Database.Batchable<SObject>, Schedulable {
+    public Database.QueryLocator start(Database.BatchableContext bc) {
+        // bulk aggregate across opportunities grouped by AccountId
+        return Database.getQueryLocator([
+            SELECT AccountId, COUNT(Id) cnt, SUM(Amount) total
+            FROM Opportunity
+            WHERE IsClosed = TRUE
+            GROUP BY AccountId
+        ]);
+    }
+
+    public void execute(Database.BatchableContext bc, List<SObject> scope) {
+        List<Summary__c> inserts = new List<Summary__c>();
+        for (SObject s : scope) {
+            AggregateResult ar = (AggregateResult)s;
+            inserts.add(new Summary__c(
+                Account__c = (Id)ar.get('AccountId'),
+                OppCount__c = (Integer)ar.get('cnt'),
+                TotalAmount__c = (Decimal)ar.get('total')
+            ));
+        }
+        upsert inserts Account__c; // bulk-safe DML
+    }
+
+    public void finish(Database.BatchableContext bc) {}
+
+    public void execute(SchedulableContext sc) {
+        Database.executeBatch(this, 200);
+    }
+}
+```
+
+Store aggregated rows in a small custom object and drive dashboard components from that object; queries will be fast and predictable.
+
+Also consider reporting snapshots (Setup → Analytics → Reporting Snapshots) to save daily aggregates without code.
+
+## When should you move data to Big Objects or Data Cloud?
+
+- If you need to retain and report on hundreds of millions of raw rows and you don't need frequent edits, move those records to Big Objects or to an external store and bring smaller aggregates back into Salesforce for dashboarding.
+- For analytics across huge datasets, use Data Cloud to build materialized views or ingest pre-aggregated tables into Tableau/Einstein Analytics.
+
+See our related deeper reads: [Salesforce and Big Data: Exploring Large-Scale Data Processing with External Systems](/salesforce-and-big-data-exploring-large-scale-data-processing-with-external-systems/) and this practical batch pattern in [Automating Processes with Apex Batch Jobs in Salesforce](/automating-processes-with-apex-batch-jobs-in-salesforce/).
+
+## What dashboard design rules prevent regressions?
+
+- One report per component: avoid embedding multiple heavy queries in a single joined report.
+- Keep dashboard components simple: prefer summary reports over matrix or row-level formulas when possible.
+- Use scheduled refreshes for heavy dashboards and set expected refresh frequency (daily/hourly) instead of live execution.
+- Store computed categories as fields (picklists/formula fields) updated by before-save Flow, not buckets.
+- Add a performance gate to your change process: require any report in a release to run in <60s in a Production-like data set.
+
+## Common mistakes
+
+- **Keeping joined reports live on dashboards** — Replace with multiple summary reports; joined reports are slow. Fix: split and recompose in the dashboard.
+- **Using buckets for core grouping logic** — Buckets compute at runtime. Fix: create a formula or picklist and populate it via Flow or migration.
+- **Large "All Time" filters on interactive dashboards** — Large ranges blow up runtime. Fix: constrain to rolling windows and provide a dedicated historical dashboard fed by snapshots.
+- **Assuming Sandbox performance equals Production** — Sandboxes typically have less data. Fix: test performance against a full copy sandbox or using production-like sample data.
+- **Running many heavy components in parallel** — Multiple slow reports together cause contention. Fix: schedule some components as images (Subscribe) or precompute.
+
+## FAQ
+
+### Why does a report run fast in Sandbox but slow in Production?
+
+Sandbox often has far less data and fewer sharing calculations. Test in a Full Copy sandbox or run the report against a production-sized dataset (or clone via Data Export) before shipping.
+
+### Are bucket fields always bad for performance?
+
+Buckets are fine for ad-hoc reporting. For dashboards viewed by many users, move bucket logic to stored fields (formula/picklist) to avoid runtime grouping costs.
+
+### Can I rely on scheduled dashboard refreshes as the only fix?
+
+Scheduled refreshes prevent interactive timeouts but only hide slow reporting. Use them as a pragmatic mitigation while you refactor underlying reports or pre-aggregate data.
+
+### When should I use Big Objects instead of Summary objects?
+
+Use Big Objects when you need immutable, append-only storage for hundreds of millions of rows. If you need small, fast aggregates for dashboards, keep summary objects in standard storage.
+
+### Will pre-aggregating with Batch Apex hit governor limits?
+
+Batch Apex runs in discrete transactions and is designed for large-scale processing. Use sensible batch sizes (50–200) and avoid doing SOQL/DML in loops. See the Apex developer docs for limits and best practices: https://developer.salesforce.com/docs
+
+Open the dashboard now, identify the single slow component, apply one 60‑minute fix (tighten filters or replace a bucket), and schedule a follow-up to implement a pre-aggregation plan or Big Object migration this quarter.
+
+
