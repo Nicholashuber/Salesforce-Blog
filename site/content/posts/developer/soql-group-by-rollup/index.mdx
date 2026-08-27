@@ -1,0 +1,205 @@
+---
+title: "SOQL GROUP BY ROLLUP: production-ready aggregate patterns for MRR cohorts"
+date: 2026-08-27T09:00:00.000Z
+category: Developer
+thumbnail: soql-group-by-rollup.png
+tags:
+  - SOQL
+  - Apex
+  - Aggregation
+  - Performance
+  - MRR
+  - Billing
+keywords:
+  - SOQL GROUP BY ROLLUP
+  - SOQL CUBE
+  - SOQL HAVING
+  - AggregateResult
+  - cohort MRR
+  - Salesforce aggregate queries
+  - SOQL aggregates
+excerpt: SOQL GROUP BY ROLLUP gives you compact cohort and subtotal rows
+  directly from the database. Learn ROLLUP, CUBE and HAVING with copy-pasteable
+  Apex to calculate monthly cohort MRR, filter sparse groups, and handle nulls
+  and governor limits.
+---
+
+# SOQL GROUP BY ROLLUP: production-ready aggregate patterns for MRR cohorts
+
+Short answer: Use SOQL GROUP BY ROLLUP to return per-cohort, per-customer, and grand totals in one query; use HAVING to drop sparse rows server-side; and parse AggregateResult in Apex to compute growth rates. The examples below show a billing/Monthly Recurring Revenue (MRR) scenario, copy-pasteable Apex, and guidance on when to aggregate in SOQL vs pre-aggregate in ETL.
+
+## How does SOQL GROUP BY ROLLUP work?
+
+GROUP BY ROLLUP(field1, field2, ...) returns all grouped combinations plus subtotal rows. For GROUP BY ROLLUP(Month, Customer) you get:
+
+- Rows grouped by (Month, Customer)
+- Subtotals for each Month (Customer = null)
+- A grand total row (Month = null, Customer = null)
+
+CUBE returns every combination (all cross-aggregates). Use CUBE when you need every intersection (Month × Region × Plan). Use HAVING to filter aggregates after grouping.
+
+Reference: See the [Salesforce SOQL developer docs](https://developer.salesforce.com/docs) for syntax and limits.
+
+## How to calculate monthly cohort MRR with ROLLUP (worked example)
+
+Object used: Subscription__c with these fields:
+
+- Billing_Month__c (Date) — first day of month for cohort (e.g., 2026-08-01)
+- Account__c (Lookup(Account)) — customer
+- MRR__c (Currency)
+
+SOQL with ROLLUP and HAVING:
+
+```sql
+SELECT Billing_Month__c, Account__c, SUM(MRR__c) totalMRR
+FROM Subscription__c
+WHERE Billing_Month__c >= :startMonth AND Billing_Month__c <= :endMonth
+GROUP BY ROLLUP(Billing_Month__c, Account__c)
+HAVING SUM(MRR__c) >= :minSum
+```
+
+This returns per-customer MRR rows, per-month subtotal rows (Account__c = null), and a grand total row (Billing_Month__c = null).
+
+A copy-pasteable Apex helper that returns month subtotals and computes month-over-month growth:
+
+```apex
+public with sharing class BillingAnalytics {
+    public class MonthMRR {
+        public Date month;
+        public Decimal totalMRR;
+        public MonthMRR(Date m, Decimal t){ month = m; totalMRR = t; }
+    }
+
+    public static List<MonthMRR> getMonthlyCohortMRR(Date startMonth, Date endMonth, Decimal minSum) {
+        List<MonthMRR> results = new List<MonthMRR>();
+
+        List<AggregateResult> agg = [
+            SELECT Billing_Month__c, Account__c, SUM(MRR__c) totalMRR
+            FROM Subscription__c
+            WHERE Billing_Month__c >= :startMonth AND Billing_Month__c <= :endMonth
+            GROUP BY ROLLUP(Billing_Month__c, Account__c)
+            HAVING SUM(MRR__c) >= :minSum
+        ];
+
+        // Collect month subtotals (Account__c == null) into a map
+        Map<Date, Decimal> monthTotals = new Map<Date, Decimal>();
+        for (AggregateResult ar : agg) {
+            Date month = (Date) ar.get('Billing_Month__c');
+            Id acct = (Id) ar.get('Account__c');
+            Decimal total = (Decimal) ar.get('totalMRR');
+
+            if (month == null) {
+                // This is a grand total row; skip if you only want month rows
+                continue;
+            }
+
+            if (acct == null) {
+                // Month subtotal
+                monthTotals.put(month, total);
+            }
+        }
+
+        // Build ordered results and compute simple MoM growth
+        List<Date> months = new List<Date>(monthTotals.keySet());
+        months.sort();
+        Date prev = null;
+        for (Date m : months) {
+            Decimal total = monthTotals.get(m);
+            results.add(new MonthMRR(m, total));
+            prev = m;
+        }
+        return results;
+    }
+}
+```
+
+After you have monthTotals you can compute growth in Apex safely (handle division-by-zero).
+
+## When should you use HAVING to cut sparse groups?
+
+HAVING filters after the GROUP BY step, so it can remove low-value rows without returning them to Apex. Use HAVING when:
+
+- You want to avoid shipping thousands of tiny rows to Apex/UI.
+- The filter condition is an aggregate (SUM, COUNT). HAVING accepts only aggregate expressions.
+
+Example: drop groups with SUM(MRR__c) < 1000
+
+```sql
+... GROUP BY ROLLUP(Billing_Month__c, Account__c)
+HAVING SUM(MRR__c) >= 1000
+```
+
+This reduces returned AggregateResult rows and CPU work in Apex.
+
+## How to handle null grouping keys and calculate on AggregateResult
+
+ROLLUP subtotals use nulls to indicate aggregated levels. Detect them in Apex using ar.get(field) == null. Always use aliases for aggregates and cast explicitly:
+
+```apex
+Decimal total = (Decimal) ar.get('totalMRR');
+Date month = (Date) ar.get('Billing_Month__c');
+Id acct = (Id) ar.get('Account__c');
+
+// Example: grand total if month == null && acct == null
+```
+
+Computations (ratios, percent change) should be done in Apex, not in SOQL. Example: compute percent growth safely:
+
+```apex
+Decimal prev = 0; // from previous month
+Decimal curr = monthTotals.get(currMonth);
+Decimal pct = (prev == 0) ? null : (curr - prev) / prev * 100;
+```
+
+Store null for undefined percentage to avoid misleading 0% values.
+
+## Decision table: aggregate in SOQL vs pre-aggregate in ETL
+
+- When to aggregate in SOQL
+  - Need near-real-time numbers (on-demand dashboards, UI widgets).
+  - Simple grouping dimensions under transactional data volume (< tens of millions rows).
+  - Want DB-level filtering (HAVING) to reduce returned row count.
+
+- When to pre-aggregate in ETL / Data Warehouse
+  - Very large historic datasets or many dimensions (high-cardinality joins).
+  - Complex transformations, machine learning features, or long history of point-in-time snapshots.
+  - You need retention and long-running compute outside governor limits.
+
+Compare pros/cons: SOQL aggregation is immediate and simple but subject to Apex governor limits and returned-row limits; ETL handles large scale and complex joins but adds latency and operational overhead.
+
+## Performance and governor-limit notes
+
+- Aggregate queries still count against the query limits and returned rows for the transaction. See the [Salesforce developer docs](https://developer.salesforce.com/docs) for exact behaviors.
+- Be aware of the governor limits described in our guide on [Apex transactions and governor limits](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/understanding-apex-transactions-and-governor-limits-in-salesforce/index.mdx) and the deeper SOQL tuning advice in [Optimizing Salesforce SOQL Queries: Best Practices for Performance and Limits](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/optimizing-salesforce-soql-queries-for-performance-and-limits/index.mdx).
+- Practical tips:
+  - Add selective WHERE clauses (date range + indexed fields). GROUP BY still scans the filtered set.
+  - Limit CUBE usage — results explode combinatorially.
+  - If query returns thousands of groups, page results to a reporting store instead of holding them in Apex.
+
+## Common mistakes (and fixes)
+
+- **Expecting ROLLUP rows to include an explicit subtotal flag.** Fix: detect subtotal/grand-total by checking grouping field(s) for null.
+- **Using HAVING with a non-aggregate expression.** Fix: move the predicate into WHERE if it references non-aggregated columns, or rewrite it as a SUM/COUNT aggregate.
+- **Pulling tens of thousands of aggregate rows into Apex.** Fix: add HAVING to cut low-value groups or pre-aggregate in ETL for large cardinality.
+- **Casting AggregateResult values without null checks.** Fix: always guard ar.get(...) == null before casting and handle nulls explicitly.
+- **Using CUBE for many dimensions without considering result size.** Fix: estimate combinations (product of distinct cardinalities) before running and prefer ROLLUP for linear subtotals.
+
+## FAQ
+
+### What does GROUP BY ROLLUP do in SOQL?
+GROUP BY ROLLUP returns grouped rows and a set of subtotals and a grand total. For columns A,B it returns (A,B), (A,null), (null,null).
+
+### When should I use CUBE instead of ROLLUP?
+Use CUBE when you need every combination of the grouping columns (all intersections). Use it sparingly — results grow exponentially with dimensions.
+
+### Can I use HAVING without GROUP BY ROLLUP?
+Yes. HAVING filters aggregated rows produced by any GROUP BY. It only accepts aggregate expressions (SUM, COUNT, etc.).
+
+### How many rows can an aggregate query return?
+Aggregate queries are subject to returned-row and resource limits; check the [Salesforce developer docs](https://developer.salesforce.com/docs) for current limits and specifics for COUNT(), GROUP BY and aggregate results.
+
+### How do I handle nulls in grouping keys?
+Null grouping keys indicate subtotal/grand-total levels in ROLLUP/CUBE. Detect them with ar.get(field) == null and map to a subtotal bucket in Apex.
+
+Final practical step: try the example list query in a developer sandbox with a narrow date range, inspect the AggregateResult rows in Execute Anonymous, then promote the safe logic into a scheduled Apex job or a UI controller as needed.
+
