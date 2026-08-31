@@ -1,0 +1,184 @@
+---
+title: "Apex execution context: exact matrix of transactions, limits, and safe
+  coding patterns"
+date: 2026-08-31T09:00:00.000Z
+category: Developer
+thumbnail: apex-execution-context-matrix.png
+tags:
+  - Apex
+  - governor-limits
+  - transactions
+  - triggers
+  - async-apex
+  - flow
+  - platform-events
+  - testing
+keywords:
+  - Apex execution context
+  - Apex transaction
+  - Apex governor limits
+  - Trigger context variables
+  - Queueable chaining
+  - Platform Event Apex
+  - invocable apex
+  - Flow and Apex
+excerpt: A compact, annotated matrix that shows exactly when Salesforce starts a
+  new Apex transaction, which Trigger.* variables exist, and which Limits.*
+  counters reset. Includes copy-pasteable Apex examples and tests for Flow →
+  Apex, Platform Event handlers, and Queueable chaining so you can write
+  context-safe code and catch regressions in CI.
+---
+
+# Apex execution context: exact matrix of transactions, limits, and safe coding patterns
+
+Short answer
+
+Apex execution context (transaction) boundaries are created whenever Salesforce begins a new unit of work: user UI actions, an invocable Apex called from a Record-Triggered Flow shares the same transaction as the flow, Platform Event subscribers and each Queueable/future/batch execute in their own transaction, and Test.startTest()/stopTest() resets limits and runs queued async jobs. Use the matrix below to know exactly which Trigger.* variables exist and which Limits.* counters reset, then follow the patterns and tests to be context-safe.
+
+## What is the quick matrix for Apex execution context?
+
+| Context | New transaction? | Shares caller limits? | Trigger.* variables visible | Typical reset points (Limits.*) | Notes |
+|---|---:|---:|---|---|---|
+| User-initiated DML / Execute Anonymous | Yes | N/A (it's the top transaction) | Trigger.new/old, map variants (for DML) | Fresh limits for this transaction | Synchronous; start of work unit |
+| Record-Triggered Flow → Invocable Apex | No (same tx) | Shares limits with Flow | No platform trigger variables; your Apex receives parameters (invocable) | Same limits as Flow/trigger that called it | Flow and Apex consume same governor pool — keep methods efficient |
+| Apex Trigger (insert/update/delete) | Yes (the trigger runs inside the DML txn) | N/A | Trigger.new, Trigger.oldMap, Trigger.isExecuting, Trigger.isBefore/After, etc. | Fresh for this transaction | Follow one-trigger-per-object pattern |
+| Platform Event subscriber (Apex trigger on MyEvent__e) | Yes — each delivery worker is its own transaction | No | Trigger.new (list of events); no Trigger.old/oldMap | Fresh per delivery transaction | Delivery is async; in tests use Test.startTest()/stopTest() to process events |
+| @future / Queueable | Yes — separate txn per job | No | No Trigger.* for the initiating DML unless you pass ids | Fresh for each queued job | Queueables can chain; each chain link is a new transaction |
+| Batch Apex (start/execute/finish) | Yes — each execute(batch chunk) is a separate txn | No | Execute receives scope, no Trigger.* | Fresh per chunk | Use Database.Stateful to persist across chunks (but watch heap) |
+| Apex REST (HTTP request) | Yes — each request is a txn | No | No Trigger.* (unless you do DML that then fires triggers) | Fresh | Auth user context may vary |
+| Test context, inside a single @isTest method | Yes, but see Test.startTest()/stopTest() behavior | Limits apply per test method; Test.startTest resets governor limits for the code run between start/stop | Trigger.* available for DML as usual | startTest()/stopTest(): resets limits and runs async jobs queued before stopTest() | Use startTest()/stopTest() to assert async behavior deterministically (Spring 'XX+ behavior applies) |
+
+Notes: Limits.getLimit*() are per-transaction caps; Limits.get*() returns consumption for the current transaction. When a new transaction starts (async job, platform event delivery, batch chunk), consumption counters start at zero again.
+
+## How do I tell if my code runs in the same transaction as a Flow or Trigger?
+
+1. If your Apex is an @InvocableMethod called from a Record-Triggered Flow, it runs inside the same transaction and shares governor limits with the Flow and any triggers fired by the same DML.
+2. If your Apex is invoked by a Queueable, future, Batch.execute, Platform Event delivery, or an external HTTP request, it runs in a new transaction with a fresh limits budget.
+3. In tests, code executed between Test.startTest() and Test.stopTest() runs with reset limits; queued async jobs execute after stopTest().
+
+See the invocable example below to avoid accidentally consuming shared limits.
+
+## How to write context-safe Apex (patterns you can copy)
+
+- Keep Apex stateless. Use only method parameters and non-static helpers. Avoid globals that rely on cross-transaction state.
+- One trigger per object. Delegate to a handler class to keep trigger logic testable and avoid ordering surprises.
+- Guard heavy work behind explicit transaction-safety checks (e.g., only run large queries in async contexts, or use Limits.getQueries() to early-return when near a limit).
+- Prefer Queueable for long-running tasks, but assume limits reset between chain links.
+- When Flow calls Apex, assume you share the same limits — perform small, batching-friendly work and let heavy lifting run async.
+
+Example: invocable Apex used by Flow — small, idempotent, bulkified
+
+```apex
+public with sharing class FlowInvocableExample {
+    @InvocableMethod(label='Mark Accounts Processed')
+    public static void markProcessed(List<Id> accountIds) {
+        if (accountIds == null || accountIds.isEmpty()) return;
+        // Bulkified single DML; safe to call from Flow
+        List<Account> toUpdate = [SELECT Id, Processed__c FROM Account WHERE Id IN :accountIds];
+        for (Account a : toUpdate) a.Processed__c = true;
+        update toUpdate;
+    }
+}
+```
+
+## Worked scenario 1 — Flow calling Apex: how to prove shared limits in a test
+
+Because flows call invocable Apex inside the same transaction, a flow’s SOQL usage counts against the same Limits.*. When testing, call the invocable method directly (unit tests run in their own transaction); use startTest/stopTest if you also want to exercise async work.
+
+## Worked scenario 2 — Platform Event subscriber (after publish)
+
+A platform-event Apex trigger runs in its own transaction. This example writes the observed Limits.getQueries() into an Account record so your test can assert limits reset per delivery.
+
+```apex
+// Trigger on platform event My_Event__e
+trigger MyEventTrigger on My_Event__e (after insert) {
+    // ❗ keep work minimal in event handler
+    List<Account> audits = new List<Account>();
+    for (My_Event__e ev : Trigger.new) {
+        Account a = new Account(Name = 'PE-Audit-' + String.valueOf(System.now().getTime()));
+        a.Description = 'queries=' + String.valueOf(Limits.getQueries());
+        audits.add(a);
+    }
+    insert audits;
+}
+```
+
+Test snippet (publish event and assert audit account exists). Use Test.startTest()/stopTest() to force delivery.
+
+```apex
+@isTest
+static void testPlatformEventLimits() {
+    Test.startTest();
+    My_Event__e ev = new My_Event__e(Payload__c='x');
+    Database.SaveResult sr = EventBus.publish(ev);
+    Test.stopTest();
+
+    // Query the audit account created by the event handler
+    Account audit = [SELECT Description FROM Account WHERE Name LIKE 'PE-Audit-%' LIMIT 1];
+    System.assert(audit.Description.startsWith('queries='));
+}
+```
+
+## Worked scenario 3 — Queueable chaining: show limits reset between jobs
+
+Each Queueable.execute runs in a new transaction. The first job can enqueue a second, and you'll observe limits reset inside the second.
+
+```apex
+public class ChainQueueable implements Queueable {
+    private Boolean chainNext;
+    public ChainQueueable(Boolean chainNext) { this.chainNext = chainNext; }
+    public void execute(QueueableContext ctx) {
+        Integer used = Limits.getQueries();
+        Account a = new Account(Name='Q-Audit-' + String.valueOf(System.currentTimeMillis()), Description='queries=' + used);
+        insert a;
+        if (chainNext) System.enqueueJob(new ChainQueueable(false));
+    }
+}
+
+@isTest
+static void testQueueableChaining() {
+    Test.startTest();
+    System.enqueueJob(new ChainQueueable(true));
+    Test.stopTest();
+    // Two audit accounts should exist; queries in second job will be small (reset)
+    List<Account> audits = [SELECT Name, Description FROM Account WHERE Name LIKE 'Q-Audit-%' ORDER BY CreatedDate DESC LIMIT 2];
+    System.assert(audits.size() >= 1);
+}
+```
+
+## Best practices checklist for CI tests that catch context regressions
+
+- Include tests that call invocable methods directly and via the Flow Interview API when possible to assert shared limits.
+- Use Test.startTest()/stopTest() to run and assert async behavior deterministically.
+- Add lightweight audit writes (to a test Account) in async pieces so you can assert what ran and with what resource consumption.
+- CI should fail on tests that assert hard numeric limits; instead assert relative behavior (e.g., second queueable saw near-zero queries).
+- Run tests in a scratch/non-prod org matching your production features (Platform Events, Flows enabled).
+
+## Common mistakes (and how to fix them)
+
+- **Assuming Flow-invoked Apex is async.** Fix: treat Invocable Apex as synchronous; keep it tiny and push heavy work to async jobs.
+- **Putting business logic in triggers directly.** Fix: one trigger per object that delegates to handler classes; keeps behavior consistent across contexts.
+- **Relying on static variables across async boundaries.** Fix: use persistent storage (records) for cross-transaction coordination or Platform Cache with expiry and checks.
+- **Not using Test.startTest()/stopTest() when testing async or platform events.** Fix: wrap enqueue/publish in startTest/stopTest to ensure execution in tests.
+
+## FAQ
+
+### What exactly resets when a new Apex transaction starts?
+Limits counters (SOQL rows, query count, DML statements, heap size, CPU time) reset when a new transaction begins. Limits.getLimit*() are constants for the transaction; Limits.get*() returns consumption for the current transaction.
+
+### Does a Record-Triggered Flow and an Invocable Apex share governor limits?
+Yes. An invocable Apex called from a Record-Triggered Flow executes inside the same transaction and shares the same governor limits as the Flow and any triggers fired by the same DML.
+
+### Does Test.startTest() reset limits?
+Yes. Code executed between Test.startTest() and Test.stopTest() has fresh governor limits. Async jobs queued before stopTest() are executed during stopTest() in tests.
+
+### Are platform event deliveries single-threaded per transaction?
+Each delivery worker runs in its own transaction; a single publish that fan-outs to multiple subscribers executes each subscriber in its own transaction.
+
+### How do I prove in tests that limits reset between queueables?
+Use Test.startTest()/stopTest() to run queued jobs, and have each queueable write an audit record (Account or a custom test object) with Limits.getQueries() or other Limits.get*() values; assert the values in your test.
+
+For further reference, see the Salesforce Developer Docs on governor limits and Platform Events: https://developer.salesforce.com/docs
+
+Final practical next step: add one small test per async pattern (Queueable, Platform Event, Batch) that writes an audit record with Limits.getQueries(); include them in CI so context regressions fail fast.
+
