@@ -1,0 +1,211 @@
+---
+title: "Salesforce AWS integration Named Credential: SigV4, presigned S3
+  uploads, and Lambda callouts"
+date: 2026-09-03T09:00:00.000Z
+category: Integrations
+thumbnail: salesforce-aws-integration-named-credential.png
+tags:
+  - Apex
+  - LWC
+  - Named Credential
+  - AWS
+  - Integrations
+  - Platform Events
+  - S3
+keywords:
+  - Salesforce AWS integration Named Credential
+  - AWS SigV4 Apex
+  - presigned S3 upload LWC
+  - Apex SigV4 signer
+  - Lambda signed headers Salesforce
+excerpt: "How to call AWS APIs from Apex without storing AWS keys in custom
+  settings: use a Named Credential where possible (AWS SigV4 auth) and fall back
+  to a compact Apex SigV4 signer for cases Named Credential can't cover.
+  Includes an LWC direct-to-S3 presigned-upload pattern, a Lambda webhook signed
+  with IAM headers, and durable retry patterns with Platform Events."
+---
+
+# Salesforce AWS integration Named Credential: SigV4, presigned S3 uploads, and Lambda callouts
+
+Short answer
+
+Use a Named Credential with AWS SigV4 auth for straightforward AWS REST APIs (Setup → Named Credentials → New). When you must compute signatures yourself (presigned S3 PUTs, custom Signed-Header Lambda calls, or temporary credentials flows), store only the IAM Access Key ID in a protected Custom Metadata record and use a Protected Custom Setting or, preferably, an External Credential tied to Named Credential for secrets. When Named Credential can’t cover a use case, use a compact Apex SigV4 signer to create Authorization headers or presigned URLs and call AWS with HttpRequest. Queue failed callouts to a Platform Event for durable retries.
+
+## How do I configure a Named Credential for AWS SigV4?
+
+1. Create an External Credential (optional, recommended for secrets rotation):
+   - Setup → External Credentials → New. Use a descriptive name like AWS_IAM_Prod.
+   - Store Access Key ID and Secret Access Key in the External Credential or in a protected Custom Metadata type.
+
+2. Create the Named Credential:
+   - Setup → Named Credentials → New.
+   - Label: AWS-SigV4-Prod, URL: https://s3.amazonaws.com (or the AWS service base URL).
+   - Identity Type: Named Principal.
+   - Authentication Protocol: AWS Signature Version 4.
+   - Scope: leave blank unless you need a specific scope.
+   - Principal/credential: link the External Credential you created or paste Access Key/Secret (use External Credential for security).
+   - Save.
+
+When a Named Credential uses AWS SigV4, Apex HttpRequest can call the Named Credential endpoint without you building the SigV4 header; HttpRequest.setEndpoint('callout:AWS-SigV4-Prod/some/path') and Salesforce signs the request.
+
+Reference: see the Salesforce Developer Docs for Named Credentials and callouts [Salesforce Developer Docs](https://developer.salesforce.com/docs).
+
+## When can't I use a Named Credential and what do I do instead?
+
+You will need explicit signing when:
+
+- You must generate presigned S3 URLs for direct browser uploads.
+- You call an AWS service with custom canonical query parameters not supported by the Named Credential wrapper.
+- You call a Lambda function URL or API Gateway endpoint that requires a signed IAM Authorization header for a non-HTTP client.
+
+In those cases, use an Apex SigV4 signer. The signer computes the canonical request, the string-to-sign, derives the signing key, and produces the Authorization header or a presigned URL.
+
+### Compact Apex SigV4 signer (for Authorization header)
+
+```apex
+public with sharing class AwsSigV4 {
+    public class SigResult {
+        public String authorizationHeader;
+        public String amzDate;
+    }
+
+    public static SigResult sign(String httpMethod, String host, String uri, String queryString, String payload, String region, String service, String accessKey, String secretKey) {
+        String amzDate = Datetime.now().formatGMT('yyyyMMdd\'T\'HHmmss\'Z\'');
+        String dateStamp = Datetime.now().formatGMT('yyyyMMdd');
+        String payloadHash = EncodingUtil.convertToHex(Crypto.generateDigest('SHA-256', Blob.valueOf(payload)));
+
+        String canonicalUri = uri.startsWith('/') ? uri : '/' + uri;
+        String canonicalQueryString = queryString == null ? '' : queryString;
+
+        // minimal canonical headers and signed headers
+        String canonicalHeaders = 'host:' + host + '\n' + 'x-amz-date:' + amzDate + '\n';
+        String signedHeaders = 'host;x-amz-date';
+
+        String canonicalRequest = httpMethod + '\n' + canonicalUri + '\n' + canonicalQueryString + '\n' + canonicalHeaders + '\n' + signedHeaders + '\n' + payloadHash;
+        String hashedCanonicalRequest = EncodingUtil.convertToHex(Crypto.generateDigest('SHA-256', Blob.valueOf(canonicalRequest)));
+
+        String algorithm = 'AWS4-HMAC-SHA256';
+        String credentialScope = dateStamp + '/' + region + '/' + service + '/aws4_request';
+        String stringToSign = algorithm + '\n' + amzDate + '\n' + credentialScope + '\n' + hashedCanonicalRequest;
+
+        // derive signing key
+        Blob kSecret = Blob.valueOf('AWS4' + secretKey);
+        Blob kDate = Crypto.generateMac('HmacSHA256', Blob.valueOf(dateStamp), kSecret);
+        Blob kRegion = Crypto.generateMac('HmacSHA256', Blob.valueOf(region), kDate);
+        Blob kService = Crypto.generateMac('HmacSHA256', Blob.valueOf(service), kRegion);
+        Blob kSigning = Crypto.generateMac('HmacSHA256', Blob.valueOf('aws4_request'), kService);
+
+        Blob signatureRaw = Crypto.generateMac('HmacSHA256', Blob.valueOf(stringToSign), kSigning);
+        String signature = EncodingUtil.convertToHex(signatureRaw);
+
+        String authorizationHeader = algorithm + ' ' + 'Credential=' + accessKey + '/' + credentialScope + ', ' + 'SignedHeaders=' + signedHeaders + ', ' + 'Signature=' + signature;
+
+        SigResult r = new SigResult();
+        r.authorizationHeader = authorizationHeader;
+        r.amzDate = amzDate;
+        return r;
+    }
+}
+```
+
+Usage example (Apex HTTP call when Named Credential can't be used):
+
+```apex
+String host = 'lambda.us-east-1.amazonaws.com';
+String uri = '/2015-03-31/functions/my-func/invocations';
+AwsSigV4.SigResult sig = AwsSigV4.sign('POST', host, uri, '', jsonPayload, 'us-east-1', 'lambda', ACCESS_KEY, SECRET_KEY);
+HttpRequest req = new HttpRequest();
+req.setEndpoint('https://' + host + uri);
+req.setMethod('POST');
+req.setHeader('Content-Type', 'application/json');
+req.setHeader('x-amz-date', sig.amzDate);
+req.setHeader('Authorization', sig.authorizationHeader);
+req.setBody(jsonPayload);
+Http http = new Http();
+HTTPResponse res = http.send(req);
+```
+
+This pattern uses plain IAM credentials at runtime. Keep secrets out of plaintext records — prefer External Credential or Protected Custom Metadata and rotate keys regularly.
+
+## How to do LWC direct-to-S3 presigned uploads with a small Apex presigner?
+
+Design: Apex generates a presigned PUT URL (short TTL) and returns it to the LWC. The LWC uploads directly to S3 using fetch/PUT. This avoids routing binary through Salesforce and keeps file size and limits small.
+
+Apex presigner (high-level steps):
+- Build the canonical request for a PUT to https://{bucket}.s3.amazonaws.com/{key}
+- Calculate X-Amz-Algorithm, X-Amz-Credential, X-Amz-Date, X-Amz-Expires, X-Amz-SignedHeaders
+- Derive signature using HMAC-SHA256 chain (see signer above)
+- Return full presigned URL to LWC
+
+LWC (JS) example (fetch PUT):
+
+```javascript
+// uploadFile.js
+async function uploadPresigned(url, file) {
+  const res = await fetch(url, { method: 'PUT', body: file, headers: { 'Content-Type': file.type } });
+  if (!res.ok) throw new Error('Upload failed ' + res.status);
+}
+```
+
+On the Apex side, call the same AwsSigV4 signing flow but set payloadHash to UNSIGNED-PAYLOAD when appropriate or include the computed hex digest per S3 requirements. For larger files prefer POST presigned policy documents; this example focuses on simple PUT presign.
+
+## How do I secure an AWS Lambda webhook with IAM and Signed Headers?
+
+- Create the Lambda Function URL or API Gateway endpoint.
+- Require IAM-based authentication (for function URL: set AuthType = AWS_IAM).
+- From Salesforce, sign requests using service = 'lambda' (or 'execute-api' for API Gateway).
+- Use the Apex signer above and include x-amz-date and Authorization. If using temporary credentials from STS, include X-Amz-Security-Token header with the session token.
+
+Example endpoint call in Apex is the same as the Lambda example in the signer section.
+
+## What about retries, durability, and failure patterns?
+
+- Synchronous retry inside a transaction is dangerous. Instead, enqueue failures to a Platform Event or a Queueable job for retry outside the triggering transaction.
+- Pattern: Try callout → on failure publish a Platform Event with payload and error metadata → a subscriber (Trigger on Platform Event or a Queueable job) retries with exponential backoff.
+- See our post "Building Scalable Salesforce Integrations with Platform Events" for a full durable pattern and examples: [Building Scalable Salesforce Integrations with Platform Events](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/building-scalable-salesforce-integrations-with-platform-events/index.mdx).
+
+Also consider a dead-letter object (custom object) for payloads that fail after N retries and an observability pattern that records HTTP status and AWS request IDs.
+
+## How should I test locally and in CI?
+
+- Use LocalStack to run S3, Lambda, and STS locally. Start LocalStack and point your Named Credential or test signer endpoint to http://localhost:4566.
+- For API changes, write Apex unit tests that inject a fake signer or use Stub API (HttpCalloutMock) to validate headers and payloads.
+- In CI, run tests against a short-lived AWS test account and rotate keys via External Credential.
+
+## Production notes: limits, timeouts, and configuration
+
+- Apex synchronous callouts: default 120s timeout on HttpRequest; set req.setTimeout(120000) explicitly. For large uploads, use direct-to-S3 presigned approach to avoid Salesforce payload limits.
+- Governor limits: keep callouts per transaction in mind (100 callouts per Apex transaction). Use batch/queueable or Platform Events for high volumes.
+- Rate-limiting: AWS APIs rate-limit by account and service. Implement exponential backoff with jitter on 429/5xx responses.
+- Secrets: avoid hard-coded secrets. Use External Credentials / Named Credential or Protected Custom Metadata. Rotate keys and monitor CloudTrail.
+- TLS and endpoints: use HTTPS and verify host header matches service for SigV4 canonicalization.
+
+## Common mistakes (and how to fix them)
+
+- **Putting secret keys in plain Custom Settings.** Move secrets into External Credentials or Protected Custom Metadata.
+- **Calling S3 through Salesforce for large files.** Use presigned URLs for direct-to-S3 uploads instead of proxying binaries through Apex.
+- **Not including x-amz-date or wrong date format.** Use UTC formatted as yyyyMMdd'T'HHmmss'Z' and dateStamp yyyyMMdd for credential scope.
+- **Re-signing the wrong canonical query string/order.** Sort query parameters by name and URL-encode per SigV4 rules.
+- **Retrying synchronously in a trigger.** Publish a Platform Event and retry outside the DML transaction.
+
+## FAQ
+
+### Can I store AWS keys in Named Credentials directly?
+Yes — Named Credential can hold the Access Key ID and Secret Access Key when you select AWS Signature Version 4 in the named credential configuration. Prefer External Credential integration for rotation.
+
+### When should I use presigned POST vs presigned PUT?
+Use presigned POST for browser uploads when you need form fields (content-length limits, policies). Use presigned PUT for simple direct PUT uploads. POST supports policies for content-type and size.
+
+### How do I test this without touching production AWS?
+Run LocalStack locally and point Named Credential or your Apex signer to the LocalStack endpoint (for example, http://localhost:4566). Also use HttpCalloutMock for Apex unit tests.
+
+### Do I need to sign requests to API Gateway authenticated with IAM?
+Yes. For API Gateway with IAM authorization use the same SigV4 signing flow but set service to 'execute-api'.
+
+### How do I handle temporary credentials (STS)?
+If you use STS temporary credentials, include the X-Amz-Security-Token header in the signed request and in the presigned URL query. Derive signature using the temporary secret key the same way.
+
+For a prescriptive durable retry implementation see our Platform Events integration guide: [Building Scalable Salesforce Integrations with Platform Events](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/building-scalable-salesforce-integrations-with-platform-events/index.mdx) and check the Stripe integration article for a direct-to-client upload pattern you can adapt: [Simplified Payments: Salesforce Integration with Stripe using Lightning Web Components and Node.js](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/integrations/simplified-payments-salesforce-integration-with-stripe-using-lightning-web-components-and-node-js/index.mdx).
+
+Start small: configure a Named Credential for your target AWS service and test a simple GET via HttpRequest set to callout:YourNamedCredential. If Named Credential covers your use case, you remove secrets from Apex and simplify maintenance.
+
