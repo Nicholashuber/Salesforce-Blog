@@ -1,0 +1,206 @@
+---
+title: "Polymorphic SOQL: querying WhoId, WhatId, OwnerId and custom polymorphic
+  lookups the right way"
+date: 2026-09-10T09:00:00.000Z
+category: Developer
+thumbnail: polymorphic-soql-querying-whoid-whatid-ownerid-custom-lookups.png
+tags:
+  - SOQL
+  - Apex
+  - polymorphic
+  - TYPEOF
+  - Activities
+  - Performance
+keywords:
+  - polymorphic SOQL
+  - TYPEOF SOQL
+  - WhoId WhatId OwnerId
+  - polymorphic lookup
+  - SOQL polymorphic filter
+  - Apex polymorphic access
+  - Task WhoId query
+excerpt: Practical guide to polymorphic SOQL (TYPEOF, safe field access,
+  filtering WhoId/WhatId/OwnerId, and when to use SOSL). Pasteable SOQL and
+  bulk-safe Apex patterns for Task, EmailMessage, and owner-based segmentation.
+---
+
+# Polymorphic SOQL: querying WhoId, WhatId, OwnerId and custom polymorphic lookups the right way
+
+Short answer
+
+Polymorphic SOQL uses TYPEOF (select-time polymorphism) and runtime patterns in Apex to read WhoId/WhatId/OwnerId and custom polymorphic lookups safely and scalably. Use TYPEOF in SELECT when you need different fields by target type, use key-prefix or subqueries to filter by type, and fall back to SOSL for broad text searches across object types. The examples below are paste-ready and bulk-safe.
+
+## What is polymorphic SOQL and when should you use it?
+
+Polymorphic fields (WhoId, WhatId, OwnerId, and custom polymorphic lookups) point to different sObject types from the same Id field. TYPEOF in SOQL lets you conditionally select fields from the actual target type. Use TYPEOF when you need different related fields in a single query (for example, show Contact.FirstName for contact tasks and Lead.Company for lead tasks).
+
+See the TYPEOF syntax in the Salesforce docs for details: https://developer.salesforce.com/docs
+
+## How do I write TYPEOF queries? (paste into Developer Console)
+
+Use the relationship name (Who, What, Parent, Owner) in TYPEOF. These queries are safe to paste into Developer Console → Query Editor.
+
+Task example: pick Contact vs Lead fields from Who
+
+```sql
+SELECT Id, Subject, WhoId,
+  TYPEOF Who
+    WHEN Contact THEN FirstName, LastName, Email
+    WHEN Lead THEN FirstName, LastName, Company
+  END
+FROM Task
+WHERE CreatedDate = LAST_N_DAYS:30
+LIMIT 200
+```
+
+Activity reporting (Task + Event) — get What object name when it's an Opportunity or Account
+
+```sql
+SELECT Id, Subject, WhatId,
+  TYPEOF What
+    WHEN Account THEN Name
+    WHEN Opportunity THEN Name, StageName
+  END
+FROM Task
+WHERE Status != 'Completed' AND Priority = 'High'
+LIMIT 200
+```
+
+EmailMessage filtering by parent (get only Case emails using key prefix)
+
+```sql
+SELECT Id, Subject, ParentId
+FROM EmailMessage
+WHERE ParentId LIKE '500%'
+LIMIT 200
+```
+
+Notes: key prefixes (003 = Contact, 00Q = Lead, 005 = User, 00G = Queue, 500 = Case) are widely used and reliable for filtering by target type.
+
+## How do I filter polymorphic fields in bulk (WhoId/WhatId/OwnerId)?
+
+You cannot write WHERE Who.Type = 'Contact'. Use one of these patterns:
+
+- Key-prefix filtering: WHERE WhoId LIKE '003%'
+- Subquery of known target: WHERE WhoId IN (SELECT Id FROM Contact WHERE AccountId = :accId)
+- ID collections: collect ids in Apex and use WHERE WhoId IN :whoIds
+- Owner filtering: WHERE OwnerId LIKE '005%' for users, WHERE OwnerId LIKE '00G%' for queues
+
+Examples you can paste:
+
+Filter tasks owned by users only
+
+```sql
+SELECT Id, Subject, OwnerId
+FROM Task
+WHERE OwnerId LIKE '005%'
+AND CreatedDate = LAST_N_DAYS:7
+LIMIT 500
+```
+
+Filter activities related to Contacts in a specific account (subquery)
+
+```sql
+SELECT Id, Subject, WhoId
+FROM Task
+WHERE WhoId IN (SELECT Id FROM Contact WHERE AccountId = '001xx000003DGb1')
+LIMIT 500
+```
+
+Key-prefix filtering is cheap and runs at the server; subqueries can be selective when the inner filter is selective.
+
+## How do I read polymorphic results safely in Apex (bulk-safe patterns)?
+
+Don't put SOQL inside loops. Either use TYPEOF and Database.query into List<SObject> or collect Ids by prefix and batch-query the target objects. Example: bulk-safe Task processing that resolves Who (Contact or Lead) without per-record SOQL.
+
+```apex
+// Bulk-safe: collect WhoIds and classify by prefix
+List<Task> tasks = [SELECT Id, Subject, WhoId FROM Task WHERE Id IN :Trigger.newMap.keySet()];
+Set<Id> contactIds = new Set<Id>();
+Set<Id> leadIds = new Set<Id>();
+for(Task t : tasks){
+  if(t.WhoId == null) continue;
+  String prefix = String.valueOf(t.WhoId).substring(0,3);
+  if(prefix == '003') contactIds.add(t.WhoId);
+  else if(prefix == '00Q') leadIds.add(t.WhoId);
+}
+Map<Id, Contact> contacts = contactIds.isEmpty() ? new Map<Id, Contact>() :
+  new Map<Id, Contact>([SELECT Id, FirstName, LastName FROM Contact WHERE Id IN :contactIds]);
+Map<Id, Lead> leads = leadIds.isEmpty() ? new Map<Id, Lead>() :
+  new Map<Id, Lead>([SELECT Id, FirstName, LastName, Company FROM Lead WHERE Id IN :leadIds]);
+
+// Now process in bulk without extra queries
+for(Task t : tasks){
+  if(t.WhoId == null) continue;
+  if(contacts.containsKey(t.WhoId)){
+    Contact c = contacts.get(t.WhoId);
+    // use c.FirstName, c.LastName
+  } else if(leads.containsKey(t.WhoId)){
+    Lead l = leads.get(t.WhoId);
+    // use l.Company
+  }
+}
+```
+
+Using TYPEOF in Apex (alternative): query into List<SObject> and cast the relationship
+
+```apex
+String q = 'SELECT Id, Subject, TYPEOF Who WHEN Contact THEN Id, FirstName, LastName WHEN Lead THEN Id, Company END FROM Task WHERE CreatedDate = LAST_N_DAYS:7 LIMIT 200';
+List<SObject> rows = Database.query(q);
+for(SObject r : rows){
+  SObject who = r.getSObject('Who');
+  if(who == null) continue;
+  if(who.getSObjectType() == Contact.SObjectType){
+    Contact c = (Contact)who; // safe cast
+    // c.FirstName
+  } else if(who.getSObjectType() == Lead.SObjectType){
+    Lead l = (Lead)who;
+    // l.Company
+  }
+}
+```
+
+Both patterns are bulk-safe; the id-classification approach is often faster when you only need a few fields and want to use indexed filters.
+
+## When should you use SOSL instead of polymorphic SOQL?
+
+Use SOSL when you need full-text search across multiple objects and fields (for example, search a keyword across Contact.Name, Lead.Company, Opportunity.Name). SOSL returns ids grouped by sObject type and is faster for wide text searches. Use SOQL (and TYPEOF) when you need structured joins, specific fields, or tight filters (e.g., show Contact.FirstName on Task rows).
+
+## Performance and governor-limit notes for high-volume orgs
+
+- SOQL queries per transaction: 100 (sync) — bulkify to avoid hitting this.
+- Query rows limit: 50,000 rows returned per transaction. Use LIMIT and selective filters.
+- TYPEOF adds CPU cost on the server; prefer targeted queries (filtered by CreatedDate, OwnerId, or other indexed fields) in high-volume jobs.
+- Key-prefix filtering (e.g., OwnerId LIKE '005%') is low-cost, but mixing LIKE on non-prefix values won't be selective.
+- For reporting on Activities at scale, aggregate nightly into a custom reporting table (scheduled Batch Apex or Dataflow) instead of ad-hoc TYPEOF queries over millions of rows.
+
+For more on SOQL performance, see: "Optimizing SOQL Queries for Performance in Apex" and "The Ultimate Guide to SOQL Joins in Salesforce" on this site.
+
+## Common mistakes
+
+- **Putting SOQL inside a loop.** Fix: collect ids and query once (see the bulk-safe Apex example above).
+- **Trying to WHERE Who.Type = 'Contact'.** Fix: use key-prefix (WHERE WhoId LIKE '003%') or a subquery (WHERE WhoId IN (SELECT Id FROM Contact ...)).
+- **Assuming OwnerId is always a User.** Fix: check key-prefix (005 for User, 00G for Queue) or query OwnerId targets explicitly before casting.
+- **Using TYPEOF for huge result sets without LIMIT.** Fix: add selective WHERE clauses and LIMIT, or pre-aggregate with Batch Apex.
+- **Forgetting null checks when casting polymorphic relationships.** Fix: always check for null and compare getSObjectType() before casting.
+
+## FAQ
+
+### Can I filter by object type in the WHERE clause (e.g., WHERE Who.Type = 'Contact')?
+No. WHERE does not support a .Type property on polymorphic fields. Use key-prefix filters (WhoId LIKE '003%'), subqueries, or collect ids in Apex and filter with IN.
+
+### Does TYPEOF work in Apex and REST API?
+TYPEOF works in SOQL executed from Apex (Database.query) and in API queries that support the API version that includes TYPEOF. Check the Developer Docs for current API compatibility: https://developer.salesforce.com/docs
+
+### Are key prefixes reliable for production filters?
+Yes. Key prefixes (first 3 characters of an Id) are stable and commonly used (003 = Contact, 00Q = Lead, 005 = User, 00G = Queue, 500 = Case). Prefer them for simple, server-side type filters.
+
+### When should I use TYPEOF vs pre-querying target objects?
+Use TYPEOF when you want one query that returns conditional fields for display/reporting. Use pre-querying (collect ids and query targets) when you need maximum control, better indexing, or when you must join additional filters on the target object.
+
+### Can custom polymorphic lookup fields use TYPEOF?
+Yes. TYPEOF applies to any polymorphic relationship supported by the API. Use the relationship name in TYPEOF the same way you use Who or What.
+
+Processing polymorphic relationships correctly saves you runtime errors and governor-limit headaches. Next action: paste one of the TYPEOF examples into Developer Console → Query Editor and run it against a sandbox dataset to confirm field names and prefixes match your org.
+
+
