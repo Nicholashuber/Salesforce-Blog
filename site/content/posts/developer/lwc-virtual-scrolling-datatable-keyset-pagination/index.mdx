@@ -1,0 +1,239 @@
+---
+title: LWC virtual scrolling datatable with keyset pagination (server-side cache
+  + Apex)
+date: 2026-09-14T09:00:00.000Z
+category: Developer
+thumbnail: lwc-virtual-scrolling-datatable-keyset-pagination.png
+tags:
+  - LWC
+  - Apex
+  - SOQL
+  - Pagination
+  - Performance
+keywords:
+  - LWC virtual scrolling datatable
+  - keyset pagination
+  - cursor pagination LWC
+  - Apex virtual scroll
+  - lightning datatable infinite scroll
+  - SOQL keyset pagination
+excerpt: Build a production-ready LWC virtual scrolling datatable using keyset
+  (cursor) pagination, server-side caching, and row buffering for smooth
+  infinite scroll. Includes copy-paste Apex + LWC, @wire vs imperative wiring,
+  OFFSET vs cursor vs keyset comparison, and exact governor-limit notes for
+  200–10,000 visible rows.
+---
+
+# LWC virtual scrolling datatable with keyset pagination (server-side cache + Apex)
+
+Short answer
+
+Build a smooth infinite-scroll datatable by using keyset (cursor) pagination in Apex, caching page slices server-side, and buffering rows client-side in the LWC. The pattern below includes a bulkified Apex endpoint that returns stable cursors, a Platform Cache-backed layer (server-side), and an LWC that maintains a scroll buffer and correct checkbox selection over buffered windows.
+
+## What is keyset pagination and why use it for an LWC virtual scrolling datatable?
+
+Keyset pagination (cursor-based) paginates by a record key value (for example, CreatedDate + Id) and uses WHERE ... > :lastKey ORDER BY date, Id LIMIT n. Unlike OFFSET, keyset avoids scanning earlier rows and is stable for large lists. For an infinite-scroll UI you need low-latency, repeatable pages and no OFFSET jumps when the user scrolls; keyset gives both.
+
+## How does the server-side design work (Apex + cache)?
+
+Design summary:
+
+- Apex controller provides a single method getRows(key, sortField, pageSize, filters). It returns a Page object: {rows, nextKey, lastModifiedAt}.
+- Server-side caching stores serialized page slices keyed by a deterministic cache key (filter+sort+page-firstKey) so repeated scrolls of the same window are fast.
+- When the client requests "next" it sends lastKey. Apex queries using WHERE (sortField, Id) > :lastKey ORDER BY sortField, Id LIMIT pageSize.
+- The LWC keeps a circular buffer (bufferAhead and bufferBehind) to smooth UI scrolling and maintain selection state across buffered pages.
+
+## Copy-paste Apex: keyset pagination with Platform Cache (server-side)
+
+```apex
+// Apex class: VirtualScrollController.cls
+public with sharing class VirtualScrollController {
+    public class PageResult {
+        @AuraEnabled public List<sObject> rows;
+        @AuraEnabled public String nextKey; // serialized key
+        @AuraEnabled public Datetime cachedAt;
+    }
+
+    // Example: cache-based page fetch. Requires Platform Cache to be enabled.
+    @AuraEnabled(cacheable=true)
+    public static PageResult getRows(String sObjectApi, String sortField, String lastKey, Integer pageSize, String whereClause) {
+        // Validate
+        if (pageSize == null || pageSize <= 0) pageSize = 50;
+        String cacheKey = sObjectApi + '|' + sortField + '|' + String.valueOf(lastKey) + '|' + String.valueOf(pageSize) + '|' + String.valueOf(whereClause);
+
+        // Try Platform Cache first
+        PageResult cached = (PageResult) Cache.Org.get(cacheKey);
+        if (cached != null) return cached;
+
+        // Build dynamic SOQL - keyset uses (sortField, Id) composite
+        String base = 'SELECT Id, ' + String.escapeSingleQuotes(sortField) + ' FROM ' + String.escapeSingleQuotes(sObjectApi);
+        List<String> predicates = new List<String>();
+        if (!String.isBlank(whereClause)) predicates.add('(' + whereClause + ')');
+
+        if (!String.isBlank(lastKey)) {
+            // lastKey format: <sortValue>__ID__<Id>
+            List<String> parts = lastKey.split('__ID__');
+            String lastSortVal = parts.size() > 0 ? parts[0] : null;
+            String lastId = parts.size() > 1 ? parts[1] : null;
+            // For simplicity assume sortField is a datetime or numeric/text; bind as string
+            if (lastSortVal != null && lastId != null) {
+                predicates.add('((' + sortField + ' > ' + ':' + 'lastSort') + ' OR (' + sortField + ' = ' + ':' + 'lastSort' + ' AND Id > ' + ':' + 'lastId' + '))';
+            }
+        }
+
+        String wherePart = predicates.isEmpty() ? '' : ' WHERE ' + String.join(predicates, ' AND ');
+        String orderPart = ' ORDER BY ' + sortField + ', Id ASC LIMIT ' + pageSize;
+
+        // Use Database.query with binding map
+        // Bind values
+        Map<String, Object> bind = new Map<String, Object>();
+        if (!String.isBlank(lastKey)) {
+            List<String> parts = lastKey.split('__ID__');
+            bind.put('lastSort', parts[0]);
+            bind.put('lastId', parts[1]);
+        }
+
+        String soql = base + wherePart + orderPart;
+        List<sObject> rows = Database.query(soql);
+
+        // Compute nextKey
+        String nextKey = null;
+        if (!rows.isEmpty()) {
+            sObject last = rows[rows.size()-1];
+            Object sortVal = last.get(sortField);
+            nextKey = String.valueOf(sortVal) + '__ID__' + String.valueOf((Id) last.get('Id'));
+        }
+
+        PageResult result = new PageResult();
+        result.rows = rows;
+        result.nextKey = nextKey;
+        result.cachedAt = Datetime.now();
+
+        // Put in Platform Cache for 60s
+        try { Cache.Org.put(cacheKey, result, 60); } catch (Exception ex) { /* swallow if no cache or full */ }
+
+        return result;
+    }
+}
+```
+
+Notes: this class uses dynamic SOQL with a simple key serialization. Adjust sortField escaping and type conversions for datetimes or numbers in your model. The code uses Cache.Org; see Salesforce docs (https://developer.salesforce.com/docs) for Platform Cache details.
+
+## LWC: component wiring, buffer and selection behavior
+
+- Use an outer scroll container (div) with fixed height and overflow: auto. Inside render rows with lightning-datatable or a custom row template.
+- Maintain two arrays: buffer (visible rows + prefetch ahead) and a Map of selected row Ids for checkbox state.
+- On scroll: when near bottom, call imperative Apex getRows(lastKey) and append to buffer. When near top, optionally fetch previous pages by reversing order.
+
+Example LWC (simplified):
+
+```javascript
+// virtualDatatable.js
+import { LightningElement, track } from 'lwc';
+import getRows from '@salesforce/apex/VirtualScrollController.getRows';
+
+export default class VirtualDatatable extends LightningElement {
+  @track rows = []; // buffer
+  @track columns = [/* your columns */];
+  pageSize = 100;
+  lastKey = null;
+  isLoading = false;
+  selected = new Set();
+
+  connectedCallback(){
+    this.fetchNext();
+  }
+
+  async fetchNext(){
+    if (this.isLoading) return;
+    this.isLoading = true;
+    try{
+      const result = await getRows({ sObjectApi: 'Contact', sortField: 'LastModifiedDate', lastKey: this.lastKey, pageSize: this.pageSize, whereClause: null });
+      if (result && result.rows) {
+        this.rows = [...this.rows, ...result.rows];
+        this.lastKey = result.nextKey;
+      }
+    } finally { this.isLoading = false; }
+  }
+
+  handleScroll(e){
+    const el = e.target;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) {
+      this.fetchNext();
+    }
+  }
+
+  handleRowSelection(e){
+    // Maintain selection set across buffer windows
+    const selectedRows = e.detail.selectedRows;
+    selectedRows.forEach(r => this.selected.add(r.Id));
+  }
+}
+```
+
+```html
+<!-- virtualDatatable.html -->
+<template>
+  <div class="scroll-container" onscroll={handleScroll} style="height:600px;overflow:auto;">
+    <lightning-datatable data={rows} columns={columns} key-field="Id" onrowselection={handleRowSelection} hide-checkbox-column={false}></lightning-datatable>
+    <div if:true={isLoading}>Loading…</div>
+  </div>
+</template>
+```
+
+Wire notes: use @wire only for automatic refresh and cacheable=true simple reads. For virtual scroll use imperative Apex (shown) to control page keys, maintain a single network call per fetch, and avoid wire re-invocation on unrelated reactive changes.
+
+## OFFSET vs cursor vs keyset for LWC (comparison)
+
+| Technique | Works for virtual scroll? | Performance at large offsets | Stability on concurrent writes | When to use |
+|---|---:|---:|---:|---|
+| OFFSET (OFFSET n ROWS) | Poor — requires full scan | Degrades linearly; OFFSET cost grows | Unstable: row order changes cause jumps | Small pages (<2k rows) and simple UIs |
+| Cursor (cursor token stored by server) | Good if server issues stable tokens | Efficient; server can encode state | Good if tokens are kept short-lived | When you control server state and tokens |
+| Keyset (cursor by key field) | Best for true infinite scroll | Scales well; constant cost per page | Robust; only misses rows inserted before cursor | Large lists (thousands+), sorted queries |
+
+## How to wire: @wire vs imperative (step-by-step)
+
+1. Use @wire for static, page-level datasets (single small page, <200 rows) that benefit from UI refresh and cacheable=true.
+2. Use imperative Apex for virtual scroll: you need explicit lastKey and deterministic paging. Implement getRows as @AuraEnabled(cacheable=true) only for reads that can be cached client-side; otherwise use non-cacheable to ensure fresh results.
+3. Keep single outstanding request at a time. Debounce scroll events to avoid duplicate calls.
+
+## Performance & governor limits (exact notes)
+
+- SOQL rows returned per transaction: 50,000. Your per-fetch LIMIT should be tuned; pageSize=100–500 is common. Avoid fetching >50k rows in one server call.
+- SOQL queries per transaction: 100. Bulkify any server-side logic where multiple queries could run.
+- Heap size synchronous: check current docs; large JSON serialization of thousands of rows may hit heap limits—serializing 10k rows will approach heap limits depending on field count. Prefer narrow SELECT lists.
+- For visible rows 200–10,000: keep pageSize small (100–500), buffer only a few pages client-side, and use server-side cache to avoid repeated SOQL.
+
+See Salesforce limits: https://developer.salesforce.com/docs for current numbers.
+
+## Common mistakes (and how to fix them)
+
+- **Using OFFSET for large result sets.** Fix: switch to keyset or cursor pagination to avoid OFFSET scan and UI jumps.
+- **Storing stale cursors client-side indefinitely.** Fix: expire cursors quickly and detect invalidation via lastModified timestamp; fall back to a fresh first-page fetch.
+- **Duplicated rows when inserts occur around the cursor boundary.** Fix: use composite key (sortField + Id) and stable comparison (>= vs >) rules; dedupe client-side by Id.
+- **Allowing multiple concurrent fetches on fast scroll.** Fix: implement a singleRequest flag or promise queue and debounce scroll events.
+- **Selecting rows only in the current buffer.** Fix: maintain a global Set of selected Ids and map it into rendered rows so selection persists as pages come and go.
+
+## FAQ
+
+### How do I handle sorting on multiple fields?
+Include all sort fields in the ORDER BY and use a composite key containing all sort field values joined with Id when generating nextKey. Ensure your WHERE keyset predicate mirrors the multi-field lexicographic comparison.
+
+### Can I use lightning-datatable built-in infinite loading?
+lightning-datatable doesn’t provide virtual scrolling out-of-the-box for very large sets; you must implement a scroll container and incremental fetch as shown. The datatable supports pagination controls but not smooth keyset virtual scroll in standard form.
+
+### Is Platform Cache required?
+No. Platform Cache speeds repeat page fetches but you can omit it; without it the server will run the SOQL each fetch. Platform Cache requires allocation in your org.
+
+### How do I detect that a cursor is stale?
+Return a lastModifiedAt or result version with each page. If the client sees a mismatch (e.g., a desktop-wide update), discard the cursor and fetch from the head.
+
+### Should I return whole sObjects or trimmed DTOs?
+Return trimmed DTOs (only fields the UI needs) to reduce heap and network payload. Use JSON-serializable Apex wrapper types if you need to include computed flags.
+
+This pattern gives you a production-ready starting point: keyset pagination for stable pages, Platform Cache for speed, and a client-side buffer + global selection set for smooth scrolling and correct checkbox behavior. For tuning, link your implementation to the org's current Platform Cache allocation and the limit docs at https://developer.salesforce.com/docs and test with realistic data sizes in a sandbox.
+
+Next step: copy the Apex and LWC snippets into a sandbox, set Platform Cache, and run with pageSize=100 while monitoring heap and query rows.
+
+References: see the Apex governor limits and Platform Cache documentation on Salesforce Developer Docs, and read about optimizing SOQL queries in this site's Optimizing SOQL Queries for Performance in Apex (https://synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/optimizing-salesforce-soql-queries-best-practices-for-performance-and-limits/index.mdx) and Understanding Apex Transactions and Governor Limits in Salesforce (https://synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/understanding-apex-transactions-and-governor-limits-in-salesforce/index.mdx).
+
