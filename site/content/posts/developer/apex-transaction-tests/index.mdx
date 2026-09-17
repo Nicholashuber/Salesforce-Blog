@@ -1,0 +1,213 @@
+---
+title: "Apex transaction tests: simulating commits, rollbacks, and mixed-DML safely"
+date: 2026-09-17T09:00:00.000Z
+category: Developer
+thumbnail: apex-transaction-tests.png
+tags:
+  - Apex
+  - testing
+  - transactions
+  - governor-limits
+  - Queueable
+  - Platform Cache
+  - mixed-dml
+  - Unit Tests
+keywords:
+  - Apex transaction tests
+  - Apex test transactions
+  - Test.startTest Test.stopTest
+  - savepoint rollback test
+  - mixed DML test
+  - Queueable testing Salesforce
+  - Platform Cache tests
+  - transaction boundaries Apex
+excerpt: Apex transaction tests explain how transaction boundaries behave inside
+  @isTest methods, how to use Test.startTest()/Test.stopTest(), savepoints and
+  rollbacks, and safe patterns for mixed-DML. Read runnable test-class examples,
+  a failing mixed-DML test and production-safe fixes, plus a decision table and
+  governor-limit notes for test transactions.
+---
+
+# Apex transaction tests: simulating commits, rollbacks, and mixed-DML safely
+
+Short answer
+
+Apex test methods always roll back database DML at the end of the test method, but you can simulate real transaction boundaries inside @isTest methods with savepoints, Database.rollback, and by running work in separate transactions via Test.startTest()/Test.stopTest() (which executes queued async jobs). Use Platform Cache or a Queueable handoff to observe commit-like behavior during a test, and avoid mixed-DML exceptions by separating setup-object DML (User, Group, etc.) and non-setup DML into different transactions.
+
+## How do transactions behave inside @isTest methods?
+
+A test method runs in a transaction that the platform will roll back on test completion. Any DML you perform is visible within the test while it runs, and assertions can observe that state. However, the org database is not altered after the test finishes.
+
+You can create additional transaction boundaries within the test by:
+
+- Using Database.setSavepoint()/Database.rollback(savepoint) to snapshot and revert within the same transaction.
+- Enqueuing asynchronous jobs (Queueable, @future) and executing them via Test.startTest()/Test.stopTest(), which runs the async job in a separate transaction during Test.stopTest().
+
+See the official docs for limits and behavior: [Salesforce Developer Docs](https://developer.salesforce.com/docs).
+
+## How do I use savepoints and rollbacks in tests?
+
+Use savepoints to undo work during a single test transaction. This is useful for testing error handling or retry logic without restarting a test.
+
+```apex
+@isTest
+private class SavepointRollbackTests {
+    @isTest static void testRollbackToSavepoint() {
+        Account a = new Account(Name='SavepointAcct');
+        insert a;
+
+        Savepoint sp = Database.setSavepoint();
+
+        Contact c = new Contact(FirstName='Rollback', LastName='Contact', AccountId=a.Id);
+        insert c;
+
+        // Assert contact exists
+        System.assertEquals(1, [SELECT COUNT() FROM Contact WHERE AccountId = :a.Id]);
+
+        Database.rollback(sp);
+
+        // Contact is rolled back, Account still exists
+        System.assertEquals(0, [SELECT COUNT() FROM Contact WHERE AccountId = :a.Id]);
+        System.assertEquals(1, [SELECT COUNT() FROM Account WHERE Id = :a.Id]);
+    }
+}
+```
+
+Notes: savepoints do not create separate transactions. They simply revert state inside the same transaction.
+
+## How do Test.startTest()/Test.stopTest() create transaction boundaries in tests?
+
+Test.startTest()/Test.stopTest() reset governor-limit counters for the foreground test and ensure that asynchronous jobs queued within the start/stop block execute synchronously at stop. The async job runs in its own transaction. That lets you observe behavior of code that depends on a committed transaction (for example, code the processes a record after it's been committed).
+
+Example: use a Queueable to simulate a downstream transaction that updates another object.
+
+```apex
+public class HandoffQueueable implements System.Queueable {
+    public Id acctId;
+    public HandoffQueueable(Id acctId) { this.acctId = acctId; }
+    public void execute(System.QueueableContext ctx) {
+        Account a = [SELECT Id, Description FROM Account WHERE Id = :acctId FOR UPDATE];
+        a.Description = 'updated-by-queueable';
+        update a;
+    }
+}
+
+@isTest
+private class TransactionBoundaryTests {
+    @isTest static void testQueueableRunsInSeparateTransaction() {
+        Account a = new Account(Name='TBAcct');
+        insert a;
+
+        Test.startTest();
+        System.enqueueJob(new HandoffQueueable(a.Id));
+        Test.stopTest(); // Queueable executes here in a separate transaction
+
+        // You can query the account and see the change within the test
+        Account got = [SELECT Description FROM Account WHERE Id = :a.Id];
+        System.assertEquals('updated-by-queueable', got.Description);
+    }
+}
+```
+
+Remember: even though you see the change inside the test, Salesforce still rolls back all DML at the end of the test method.
+
+## How do I test mixed-DML scenarios safely?
+
+Mixed DML exceptions occur when you perform DML on setup objects (User, Group, GroupMember, etc.) and non-setup objects (Account, Contact, Custom objects) in the same transaction. In tests you can fix this by splitting work across transactions. Common patterns:
+
+- Do setup-object DML first, then enqueue a Queueable (or @future) to do non-setup DML; execute it via Test.startTest()/Test.stopTest().
+- Insert non-setup DML inside a Queueable so the setup DML and non-setup DML are in different transactions.
+
+Failing example (throws MixedDmlException):
+
+```apex
+@isTest
+private class MixedDmlFailTest {
+    @isTest static void failsMixedDml() {
+        User u = new User(/* required fields here */);
+        insert u; // setup object
+
+        Account a = new Account(Name='bad');
+        insert a; // MixedDmlException occurs here if same transaction
+    }
+}
+```
+
+Fixed pattern using Queueable handoff:
+
+```apex
+public class CreateAccountQueueable implements System.Queueable {
+    public void execute(System.QueueableContext ctx) {
+        insert new Account(Name='ok');
+    }
+}
+
+@isTest
+private class MixedDmlSafeTest {
+    @isTest static void mixedDmlQueueable() {
+        // Insert a User in test transaction
+        User u = TestUtils.createTestUser();
+        insert u;
+
+        Test.startTest();
+        System.enqueueJob(new CreateAccountQueueable());
+        Test.stopTest(); // runs the account insert in a separate transaction
+
+        System.assertEquals(1, [SELECT COUNT() FROM Account WHERE Name = 'ok']);
+    }
+}
+```
+
+Alternative: use System.runAs when your test needs to execute code as a non-admin user, but runAs alone does not remove mixed-DML rules; separation of transactions is still required.
+
+## When should you use an isolated test setup vs a real transactional flow? (Decision table)
+
+| Use case | Isolated test setup (fast, single-transaction) | Real transactional flow (Queueable/@future, start/stop) |
+|---|---:|---:|
+| Unit test for a single method/class | Yes — create only the records the method needs | No |
+| Verify behavior across commit boundary (post-commit processing, triggers that fire in async) | No | Yes — use Queueable + Test.stopTest() |
+| Mixed-DML scenario | No | Yes — separate setup and non-setup DML into different transactions |
+| Performance-sensitive tests in CI | Yes — prefer isolated setup to keep tests fast | Only when necessary |
+
+## How do governor limits behave inside tests?
+
+Governor limits apply per transaction inside tests exactly like production. When you create additional transactions (Queueable executed at Test.stopTest), those transactions have their own independent limits.
+
+Common per-transaction examples you should watch for (subject to change — check the docs):
+
+- SOQL queries per transaction: 100
+- DML statements per transaction: 150
+- Total number of DML rows: 10,000
+- Synchronous CPU time limit: ~10,000 ms
+
+If a test enqueues N queueables, each queueable runs in its own transaction and has its own limits. Use Test.startTest()/Test.stopTest() to ensure you execute and count the async jobs predictably. See [Salesforce Developer Docs limits](https://developer.salesforce.com/docs) for the current numbers.
+
+## Common mistakes (and how to avoid them)
+
+- **Relying on persistent DB commits in tests.** Tests never persist DML after completion. Use platform artifacts (Platform Cache) if you need a non-DB cross-transaction artifact during the test.
+- **Assuming async jobs run immediately without Test.stopTest().** Enqueued async jobs won’t run until Test.stopTest() in test context. Always wrap queuing between Test.startTest()/Test.stopTest().
+- **Triggering MixedDmlException by inserting User and Account together.** Separate those operations into different transactions via Queueable/@future and Test.stopTest().
+- **Putting SOQL/DML inside loops in test helper code.** Tests still hit governor limits; bulkify test helpers.
+- **Using seeAllData=true to avoid setup.** That creates brittle tests. Create required test data instead.
+
+## FAQ
+
+### Can a test actually commit to the org database?
+No. Tests roll back all database DML when the test method completes. You can observe commit-like behavior during the test by using separate transactions (Queueable executed at Test.stopTest()), but nothing persists to the org.
+
+### Does Test.startTest() reset limits for async jobs?
+Test.startTest() resets governor-limit counters for the current test transaction. Async jobs queued inside the start/stop block run at Test.stopTest() in new transactions with their own limits.
+
+### Will System.runAs prevent MixedDmlException?
+No. System.runAs changes user context but does not automatically separate transactions. Use an async handoff to avoid mixed-DML errors.
+
+### Can Platform Cache be used to simulate committed state between transactions in tests?
+Yes. Platform Cache is outside the database and survives transaction rollbacks. Use org and session cache cautiously in tests to simulate persisted state between transactions.
+
+### Where can I find the latest governor limit numbers and transaction behavior docs?
+Check [Salesforce Developer Docs](https://developer.salesforce.com/docs) and the Apex Limits section in the release notes for the current numbers and changes.
+
+Make a small experiment now: write one test that inserts a User, then Test.startTest() enqueues a Queueable to insert an Account, Test.stopTest(), and assert the account exists — that pattern fixes mixed-DML and demonstrates transaction boundaries.
+
+Related reading: see our deep dive on [Understanding Apex Transactions and Governor Limits in Salesforce](/understanding-apex-transactions-and-governor-limits-in-salesforce/) and the primer on [Salesforce Trigger Context Variables Explained](/salesforce-trigger-context-variables-explained/) for how triggers behave across these boundaries.
+
