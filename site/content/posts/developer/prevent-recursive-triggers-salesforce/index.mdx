@@ -1,0 +1,184 @@
+---
+title: "Prevent recursive triggers Salesforce: Practical patterns to detect and
+  prevent recursion"
+date: 2026-09-21T09:00:00.000Z
+category: Developer
+thumbnail: prevent-recursive-triggers-salesforce.png
+tags:
+  - Apex
+  - Triggers
+  - Flow
+  - Automation
+  - Debugging
+  - Best Practices
+keywords:
+  - prevent recursive triggers salesforce
+  - recursive triggers salesforce
+  - trigger recursion prevention
+  - trigger context variables
+  - stop automation loops salesforce
+  - Flow marker record strategy
+excerpt: "Prevent recursive triggers salesforce: use a two-layer strategy — a
+  transaction-scoped static utility for same-transaction recursion and a
+  Flow-safe persistent marker (or Platform Cache) for cross-transaction loops.
+  Includes copy-pasteable Apex, one-trigger-per-object wiring, Flow steps, and a
+  production troubleshooting checklist."
+---
+
+# Prevent recursive triggers Salesforce: Practical patterns to detect and prevent recursion
+
+Short answer: Use a two-layer approach to prevent recursive triggers in Salesforce — (1) a transaction-scoped static utility (static Maps/Sets) to stop repeat work inside the same transaction, and (2) a persistent Flow-safe marker (marker records or Platform Cache) to prevent cross-transaction loops (Flow ↔ Trigger ↔ Process Builder ↔ managed package). Below are copy-pasteable Apex utilities, a one-trigger-per-object wiring pattern, a Flow marker pattern, and a production troubleshooting checklist.
+
+## How do recursive triggers and cross-automation loops happen?
+
+Recursion happens when automation updates a record and that update re-invokes automation that updates the record again. Typical paths:
+
+- Trigger A updates Account → Trigger B (same object) re-runs.
+- Flow updates Opportunity → Trigger fires → Flow is invoked again (same or different Flow).
+- Process Builder (legacy) or a managed package updates a field your trigger watches.
+
+Remember: static variables prevent repeated work only inside the same transaction. They do not persist across separate transactions, queued jobs, or different Apex executions. For Salesforce-trigger basics see the official docs on trigger context variables and Trigger.new/old usage (see: https://developer.salesforce.com/docs).
+
+## How do you detect recursion across Triggers, Flows, Process Builder, and managed packages?
+
+1. Reproduce in a sandbox with a small dataset. Turn on Debug Logs for a user and set Apex profiling to finest. Produce the loop and capture the log sequence.
+2. Inspect the log for repeated Handler method names, DML statements, and the same Record Id sequence.
+3. Query a marker table (see Flow marker below) for multiple rows with the same Target_Record_Id and rapidly repeated CreatedDate.
+4. In Setup review: Setup → Process Automation → Flows, Setup → Object Manager → [Object] → Triggers, and Setup → Installed Packages for managed packages touching that object.
+
+Use the logs to answer: which automation wrote the field that triggered the next automation? The answer drives the fix.
+
+## How to implement a production-safe Apex utility to prevent recursion
+
+This utility is transaction-scoped and stops repetition inside the same transaction. Use a map keyed by a unique token (for example: objectName + processName) and track processed record Ids.
+
+```apex
+public class RecursionGuard {
+    // key -> set of record Ids processed in this transaction
+    private static Map<String, Set<Id>> processedMap = new Map<String, Set<Id>>();
+
+    public static Boolean isProcessed(String key, Id recordId) {
+        if (recordId == null) return false;
+        if (!processedMap.containsKey(key)) return false;
+        return processedMap.get(key).contains(recordId);
+    }
+
+    public static void markProcessed(String key, Set<Id> recordIds) {
+        if (recordIds == null || recordIds.isEmpty()) return;
+        if (!processedMap.containsKey(key)) {
+            processedMap.put(key, new Set<Id>());
+        }
+        processedMap.get(key).addAll(recordIds);
+    }
+
+    public static void markProcessed(String key, Id recordId) {
+        markProcessed(key, new Set<Id>{recordId});
+    }
+}
+```
+
+Notes: keep keys consistent (e.g., 'Account:AfterUpdate:MyHandler'). This prevents work from running twice for the same ids in one transaction and scales to bulk operations.
+
+## How to wire one-trigger-per-object and stop recursion in a handler
+
+One-trigger-per-object keeps orchestration predictable. The trigger delegates to a handler which uses RecursionGuard.
+
+```apex
+trigger AccountTrigger on Account (before insert, before update, after update) {
+    if (Trigger.isBefore) {
+        AccountTriggerHandler.before(Trigger.new, Trigger.oldMap);
+    }
+    if (Trigger.isAfter) {
+        AccountTriggerHandler.after(Trigger.newMap.keySet());
+    }
+}
+
+public class AccountTriggerHandler {
+    public static void before(List<Account> newList, Map<Id,Account> oldMap) {
+        String key = 'Account:Before';
+        Set<Id> ids = new Set<Id>();
+        for (Account a : newList) if (a.Id != null) ids.add(a.Id);
+        // exit early
+        if (ids.isEmpty() || RecursionGuard.isProcessed(key, ids.stream().findFirst().orElse(null))) return;
+        // mark all ids and continue
+        RecursionGuard.markProcessed(key, ids);
+        // do safe, bulkified work here
+    }
+
+    public static void after(Set<Id> ids) {
+        String key = 'Account:After';
+        if (ids == null || ids.isEmpty()) return;
+        // prevents same-transaction re-entry
+        RecursionGuard.markProcessed(key, ids);
+        // do DML or callouts via future/queueable as needed
+    }
+}
+```
+
+Performance note: always bulkify. Use maps and sets; avoid SOQL/DML inside loops. See Apex governor limits for current limits (https://developer.salesforce.com/docs).
+
+## How to design a Flow-safe marker record strategy for cross-transaction loops
+
+Static guards don't survive transaction boundaries. For loops that cross transactions (Flow → Trigger → Flow or managed package updates), use a persistent marker pattern.
+
+Option A — Marker custom object (recommended when you can add metadata):
+
+- Setup → Object Manager → New Custom Object → Automation_Marker__c.
+- Fields: Target_Object__c (Text), Target_Record_Id__c (Text), Process_Name__c (Text), Expires_At__c (DateTime).
+
+Flow pattern (high level):
+
+1. At the start of the Flow use Get Records on Automation_Marker__c where Target_Record_Id__c = {!Record.Id} and Expires_At__c > $Flow.CurrentDateTime. If found, Exit the Flow.
+2. If not found, Create Records Automation_Marker__c with Expires_At__c = $Flow.CurrentDateTime + 5 minutes and Process_Name__c = 'MyFlow-123'.
+3. Proceed with updates. If subsequent automation sees the marker it will skip.
+
+Option B — Use Platform Cache for short-lived markers (faster, cross-transaction, but requires purchase and partitioning). Platform Cache keys can store processed record Ids and TTL. See https://developer.salesforce.com/docs for Platform Cache APIs.
+
+Why TTL? Short TTL avoids persistent state and lets legitimate later automation run.
+
+Edge cases: markers require coordinated naming and TTL. Always include Process Name and originate-user metadata so you can trace who created the marker.
+
+## Troubleshooting checklist for production incidents
+
+- Reproduce in a sandbox with subset data. Turn on debug logs for the affected user.
+- Identify the exact field change that triggers the next automation (search logs for the DML and field changed).
+- Run a query: SELECT Id, Target_Record_Id__c, Process_Name__c, CreatedDate FROM Automation_Marker__c WHERE Target_Record_Id__c = '...'
+- Check Setup → Object Manager → [Object] → Triggers and compare handlers against logs.
+- Review Setup → Process Automation → Flows for auto-launched and scheduled flows that touch the same fields.
+- Inspect installed packages for triggers in the same object. If a managed package is involved, search its namespace in logs.
+- If immediate mitigation is required, temporarily deactivate the offending Flow or change condition criteria in the Flow/trigger (do not delete in prod).
+- After fix, write a regression test in Apex that simulates the loop and asserts no repeated DML beyond expected.
+
+## Common mistakes and how to avoid them
+
+- **Relying on statics alone** — statics only protect one transaction; use persistent markers for multi-transaction loops. Fix: add marker-record or Platform Cache for cross-transaction safety.
+- **Marking every record unconditionally in Flow** — causes unnecessary DML and can re-trigger automations. Fix: Get Records first, only create marker when absent.
+- **Placing SOQL/DML inside loops** — triggers governor limit failures and exacerbates loops. Fix: bulkify; collect ids and run one query/update.
+- **Not naming keys consistently** — inconsistent keys break RecursionGuard effectiveness. Fix: standardize key format: Object:Context:HandlerName.
+- **Assuming managed package behavior** — you can’t change their code. Fix: use marker records or change your automation criteria to ignore changes the package makes.
+
+## FAQ
+
+### How do static variables prevent recursion in triggers?
+
+Static variables persist for the life of the current Apex transaction. Use them to record which record ids or operations have already run, and skip duplicate work inside that same transaction.
+
+### Will a static guard stop a Flow ↔ Trigger ↔ Flow loop?
+
+Only if the loop happens within the same transaction. If Flow commits and starts a new transaction (or another user/async process runs), static guards do not persist. Use persistent markers or Platform Cache for cross-transaction loops.
+
+### Should I use a field on the same record as a marker?
+
+You can, but modifying the same record writes causes another trigger invocation. Prefer a small marker object (Automation_Marker__c) or Platform Cache and keep marker writes minimal and TTL-bound.
+
+### How do I handle managed package updates that cause loops?
+
+You cannot change their code. Use marker records or change your criteria so your automation ignores the specific field changes the package performs. If possible, open a case with the vendor.
+
+### Where can I read more about trigger best practices?
+
+See the SalesforceTrigger Context Variables Explained post on this site and Advanced Salesforce Trigger Design Patterns for handler wiring and scalability. Also consult the official developer docs at https://developer.salesforce.com/docs.
+
+Take one practical step now: add the RecursionGuard class to your sandbox, wrap a handler's entrypoint with a clear key, and run a reproduction test to confirm the loop no longer repeats.
+
+
