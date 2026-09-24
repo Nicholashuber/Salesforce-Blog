@@ -1,0 +1,167 @@
+---
+title: "Custom index Salesforce: when to request a custom index or skinny table
+  (and how to make SOQL fast without breaking the org)"
+date: 2026-09-24T09:00:00.000Z
+category: Developer
+thumbnail: custom-index-salesforce-when-to-request-custom-index-skinny-table.webp
+tags:
+  - SOQL
+  - Performance
+  - Indexes
+  - Apex
+  - Developer
+keywords:
+  - custom index salesforce
+  - skinny table salesforce
+  - salesforce index request
+  - SOQL optimization
+  - Query Plan Tool
+excerpt: Learn when to ask Salesforce for a custom index or skinny table, how to
+  prove necessity with the Query Plan Tool, and safer alternatives
+  (denormalization, indexed formulas, SOSL). Includes copy-ready support request
+  text and Query Plan troubleshooting steps for the real-world Salesforce
+  architect.
+---
+
+# Custom index Salesforce: when to request a custom index or skinny table (and how to make SOQL fast without breaking the org)
+
+Short answer
+
+Request a custom index in Salesforce only after you prove a query is non-selective using the Query Plan Tool and you cannot reasonably fix it with schema or query changes. Use the Query Plan output, object row counts, and representative SOQL as evidence when opening a Performance Support case. Reserve skinny tables for hot OLTP queries that still need physical column co-location after denormalization and query fixes fail.
+
+## How do I prove a query needs a custom index?
+
+1. Identify the slow query or automation. Capture the exact SOQL used by Apex, a Flow Get Records, or the report/dashboard filter.
+2. Reproduce with representative data in a sandbox (same data distribution if possible). Run a SELECT COUNT() for the object to give row count.
+
+```sql
+SELECT COUNT() FROM Account WHERE Country__c = 'US'
+```
+
+3. Run the Query Plan for the exact SOQL (see next section). If the plan shows a Full Table Scan or indicates indexes aren't being used and the cost is high, you have evidence.
+4. Try inexpensive local fixes first: change filters to use existing indexed fields (Id, OwnerId, CreatedDate, RecordTypeId), rewrite LIKE '%foo' to SOSL or remove leading wildcards, avoid != and NOT IN patterns.
+5. If fixes change semantics or are insufficient, collect the SOQL, Query Plan output, row counts, and a short business justification for support.
+
+For background on how Salesforce chooses indexes and query plans, see the Query Plan documentation on the Salesforce Developer site: https://developer.salesforce.com/docs
+
+## How do I run and read the Query Plan Tool?
+
+Run Query Plan in Developer Console or Workbench:
+
+- Developer Console → Query Editor → paste your SOQL → click "Query Plan".
+- Workbench: REST API query plan endpoint also works for scripted examples.
+
+What to look for in the output:
+
+- "Using Index" or index name listed — the engine will use an index for that filter set.
+- Cost value — lower is better; Salesforce uses cost to compare plan choices.
+- Cardinality estimates — large cardinality on a predicate usually prevents index use.
+
+Example: run this exact query in Query Plan
+
+```sql
+SELECT Id, Name FROM Case WHERE Status = 'Escalated' AND Priority = 'High'
+```
+
+If Query Plan shows a Full Table Scan or "Index Not Usable," try changing one predicate at a time to see which field removes index usage. Use LIMIT in tests to avoid long runs when reproducing.
+
+## When should you request a custom index vs a skinny table?
+
+- Request a custom index when:
+  - Query Plan shows no index use and you've exhausted query/format fixes.
+  - The predicate field is stable, low-cardinality enough to be selective (e.g., a few discrete values that partition the data) and is frequently used in equality or prefix LIKE filters.
+  - Business impact is measurable (slow automation, Flow timeouts, or reports timing out).
+
+- Request a skinny table when:
+  - You have many joins or queries that repeatedly access the same small set of columns on a large object (Account + a handful of custom fields, for example).
+  - Denormalization would otherwise create maintenance pain or duplicate business logic.
+  - You need the absolute lowest-latency read path for standard page loads or integrations and Salesforce Support confirms a skinny table is appropriate.
+
+Notes on skinny tables:
+
+- Skinny tables physically copy columns into a single, narrower table to avoid joins and reduce I/O.
+- They are created by Salesforce Support and have restrictions (some field types and encrypted fields may be excluded). Test in a sandbox after support creates the table where possible.
+
+## How to file a support request for a custom index or skinny table (copy-ready template)
+
+Before you open a case, gather:
+
+- Org ID and Replica/Production indicator.
+- Exact SOQL(s) and the automation/deployment that runs them (Apex class/method, Flow name).
+- Query Plan output (paste the text) for the slow queries.
+- Current object row counts (SELECT COUNT()).
+- Representative execution times or stack traces showing the problem.
+- Business impact and rationale (what fails or times out, how often, who is affected).
+
+Support case template (paste into the case description):
+
+```text
+Summary: Request custom index (or skinny table) for <Object API name> to improve selectivity on filter: <Field API name>
+
+Org ID: 00Dxxxxxxxxxxxx
+Environment: Production
+Object: Account (or other object API name)
+Row count: 4,523,841
+Slow query (exact SOQL):
+SELECT Id FROM Account WHERE Region__c = 'EMEA' AND Is_Active__c = true
+
+Query Plan output:
+<paste Query Plan results verbatim>
+
+Local attempts to fix:
+- Rewrote query to use existing indexed fields (OwnerId) — no improvement
+- Removed leading wildcard in LIKE — no change in plan
+
+Requested action: Create a custom index on Account.Region__c (and/or other fields listed) OR consider creating a skinny table for Account with columns: Id, Region__c, Is_Active__c, AnnualRevenue__c
+
+Business impact: Our bulk Apex job (Class: AccountSyncBatch) times out daily and inbound integrations fail during peak hours. Indexing these fields will allow the existing selective filters to use an index and avoid full table scans.
+
+Contact: Name, email, phone
+```
+
+Open the case via Help → Contact Support in Setup or https://help.salesforce.com and choose "Performance" or "Data/Indexing" as the topic.
+
+## What alternatives should you try before asking Support?
+
+- Denormalize selectively: add a copy of a frequently filtered value to the same object so queries use an indexed field.
+- Indexed formula fields: simplify formulas to a single-field reference or deterministic expression, then request Salesforce to index that formula field (support must create the index).
+- Use SOSL for text searches rather than LIKE '%term%'.
+- Add selective filters (equality on indexed fields) earlier in the query, reorder where possible.
+- Use efficient pagination (keyset-style) and LIMIT to reduce full scans for UI components.
+- Cache expensive query results in a custom cache object, Redis, or your middleware when read consistency allows it.
+
+For SOQL design patterns and joins you may also find our guide to SOQL joins helpful: [The Ultimate Guide to SOQL Joins in Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/the-ultimate-guide-to-soql-joins-in-salesforce/index.mdx) and the deeper SOQL techniques here: [Mastering SOQL in Salesforce: Best Practices and Advanced Query Techniques](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/mastering-soql-in-salesforce-best-practices-and-advanced-query-techniques/index.mdx).
+
+## Common mistakes (and how to avoid them)
+
+- **Requesting an index without Query Plan evidence.** Support will ask for the Query Plan and counts; collect it first.
+- **Indexing high-cardinality or volatile fields like GUIDs or timestamps.** These usually aren't selective for your use case; add an index only on fields used in equality/prefix filters.
+- **Indexing boolean fields or fields with many NULLs.** These often produce low selectivity; prefer composite approaches or denormalization.
+- **Expecting immediate universal improvement.** Some queries may still perform full scans because of other predicates; test after Support applies the index.
+- **Indexing long text, rich text, or multi-select picklists.** These field types are typically ineligible or ineffective for indexing.
+
+## FAQ
+
+### How long does Salesforce take to add a custom index?
+
+Support typically responds within the normal case SLAs; the index operation is scheduled by Salesforce and can take from hours to a few days depending on object size and org activity. Provide complete evidence to avoid back-and-forth.
+
+### Can I create custom indexes from Setup?
+
+No. Custom indexes and skinny tables must be created by Salesforce Support. You can, however, create standard indexes by switching to fields that are already indexed (RecordTypeId, OwnerId) or by creating simple formula fields and asking Support to index them.
+
+### Will indexing break my sharing/security model?
+
+No. Indexes affect only read performance. They do not change sharing, visibility, or FLS. Tests after indexing should still run in a sandbox when possible.
+
+### What query patterns always prevent index usage?
+
+Leading wildcards in LIKE ('%foo'), NOT IN / != filters, and OR chains that do not share an indexed field typically prevent index use.
+
+### Are skinny tables writable and transactional?
+
+Skinny tables are managed by Salesforce and effectively read-optimized. You don't write to them directly; Salesforce keeps them in sync. Discuss maintenance and sandbox availability with Support.
+
+
+Keep one next step in mind: pick your single worst-performing SOQL, run the Query Plan in Developer Console, and paste the plan into a Support case only after trying the query and schema fixes described above.
+
