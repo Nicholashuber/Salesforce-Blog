@@ -1,0 +1,240 @@
+---
+title: "Salesforce CI/CD with GitHub Actions and SFDX: a production-ready
+  pipeline you can copy"
+date: 2026-09-28T09:00:00.000Z
+category: Developer
+thumbnail: salesforce-ci-cd-github-actions.png
+tags:
+  - ci/cd
+  - github actions
+  - sfdx
+  - unlocked packages
+  - devops
+  - lwc
+  - apex
+keywords:
+  - salesforce ci/cd github actions
+  - sfdx pipeline
+  - salesforce github actions
+  - unlocked packages pipeline
+  - salesforce ci/cd sfdx
+excerpt: A copy-pasteable GitHub Actions pipeline for Salesforce using SFDX,
+  Apex tests, LWC/Jest, and unlocked packages or Metadata API. Ship repeatable
+  deployments and promote safely to sandboxes and production.
+---
+
+# Salesforce CI/CD with GitHub Actions and SFDX: a production-ready pipeline you can copy
+
+Short answer: This repo template and GitHub Actions workflow runs linting (PMD/ESLint), LWC unit tests, Apex tests, and then builds and deploys either unlocked packages or metadata API artifacts using SFDX. Use scratch-org jobs for feature branches, sandbox jobs for release branches, and tag-based promotions to control production releases.
+
+## What does this pipeline accomplish?
+It enforces code quality, verifies server-side Apex via Apex tests, validates LWC via Jest, packages code, and deploys to target orgs with artifacts you can promote. The included jobs generate JUnit-style results and artifacts so CI failures are immediately actionable inside Pull Requests.
+
+## How should I structure the repository?
+Keep the layout minimal and predictable so SFDX commands work in CI.
+
+Example repo layout:
+
+- force-app/ (source: Apex, LWC, profiles)
+- packages/ (unlocked package source packages/) 
+- scripts/ (npm/SFDX helper scripts)
+- config/project-scratch-def.json
+- package.json
+- .github/workflows/ci.yml
+- destructive/destructiveChanges.xml
+
+Sample package.json scripts:
+
+```json
+{
+  "scripts": {
+    "lint:js": "eslint force-app/main/default/lwc --ext .js,.html",
+    "lint:apex": "pmd-bin/run.sh pmd -d force-app/main/default/classes -R rulesets/apex/" ,
+    "test:lwc": "sfdx-lwc-jest",
+    "test:apex:run": "sfdx force:apex:test:run --resultformat junit --outputdir test-results --codecoverage --wait 10",
+    "deploy:source": "sfdx force:source:deploy -p force-app --testlevel RunLocalTests --wait 10"
+  }
+}
+```
+
+Local commands to verify before pushing:
+
+```bash
+# install dev tools
+npm ci
+# run lint and unit tests
+npm run lint:js && npm run lint:apex
+npm run test:lwc
+# run apex tests against an authenticated org
+npm run test:apex:run
+```
+
+## How to set up GitHub Actions (copy-paste YAML)
+This example runs on push to feature branches, pull requests, and on tags matching v* (promotion).
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [ 'main', 'release/*' ]
+  push:
+    tags: [ 'v*' ]
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      sfdx-auth: ${{ steps.auth.out }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      - run: npm ci
+      - name: Install SFDX CLI
+        run: npm install -g sfdx-cli
+
+  lint:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run lint:js
+      - run: npm run lint:apex
+
+  lwc-test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run test:lwc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lwc-jest-results
+          path: jest-results/
+
+  apex-test-and-deploy-scratch:
+    if: github.event_name == 'pull_request'
+    needs: lwc-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - name: Authenticate with JWT
+        env:
+          SFDX_CLIENT_ID: ${{ secrets.SFDX_CLIENT_ID }}
+          SFDX_JWT_KEY: ${{ secrets.SFDX_JWT_KEY }}
+          SFDX_USERNAME: ${{ secrets.SFDX_USERNAME }}
+          SFDX_LOGIN_URL: https://test.salesforce.com
+        run: |
+          echo "$SFDX_JWT_KEY" > jwt.key
+          sfdx auth:jwt:grant --clientid $SFDX_CLIENT_ID --jwtkeyfile jwt.key --username $SFDX_USERNAME --instanceurl $SFDX_LOGIN_URL
+      - name: Create scratch org
+        run: sfdx force:org:create -f config/project-scratch-def.json -a ciScratch -s --durationdays 1
+      - name: Deploy source to scratch
+        run: sfdx force:source:deploy -p force-app --wait 10
+      - name: Run Apex tests
+        run: sfdx force:apex:test:run --resultformat junit --outputdir test-results --wait 10
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apex-test-results
+          path: test-results/
+
+  promote-to-sandbox:
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
+    runs-on: ubuntu-latest
+    needs: [lwc-test]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - name: Authenticate to sandbox
+        env:
+          SFDX_CLIENT_ID: ${{ secrets.SFDX_CLIENT_ID }}
+          SFDX_JWT_KEY: ${{ secrets.SFDX_JWT_KEY }}
+          SFDX_USERNAME: ${{ secrets.SANDBOX_USERNAME }}
+          SFDX_LOGIN_URL: https://test.salesforce.com
+        run: |
+          echo "$SFDX_JWT_KEY" > jwt.key
+          sfdx auth:jwt:grant --clientid $SFDX_CLIENT_ID --jwtkeyfile jwt.key --username $SFDX_USERNAME --instanceurl $SFDX_LOGIN_URL
+      - name: Deploy via metadata API (fallback)
+        run: sfdx force:mdapi:deploy -d deploy_dir -w 10 --testlevel RunLocalTests
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-results
+          path: test-results/
+```
+
+Notes: use secrets for SFDX_JWT_KEY, SFDX_CLIENT_ID, and org usernames. For production deployments require protected environments and manual approvals in GitHub.
+
+## How to run CI checks: Apex tests, PMD/ESLint, LWC unit tests
+- ESLint: run against force-app LWC folders. Use eslint-plugin-lit or the Salesforce LWC recommended config.
+- PMD for Apex: run PMD rulesets/apex and fail CI on violations. Store PMD reports as artifacts.
+- LWC: sfdx-lwc-jest produces JUnit-compatible output when configured; upload to GitHub Actions.
+- Apex tests: prefer running tests in a scratch org for PR validation; run full local tests against sandboxes for release branches. Use sfdx force:apex:test:run for automated runs and set --codecoverage to collect coverage data.
+
+Automated test reporting example:
+
+```bash
+sfdx force:apex:test:run --resultformat junit --outputdir test-results --codecoverage --wait 10
+# upload test-results/*.xml as CI artifact
+```
+
+## When should you use unlocked packages vs Metadata API? (decision table)
+
+| Choose | Use when | Pros | Cons | Commands |
+|---|---:|---|---|---|
+| Unlocked Packages | You have modular code, want versioning, and plan to reuse across orgs | Version control for features, faster installs, easier dependency management | Initial refactor work to modularize, packaging limits | sfdx force:package:version:create / install |
+| Metadata API (mdapi) | Monolithic org with many legacy metadata types or flows not yet packageable | Fast to adopt, minimal refactor | Harder to promote and test incrementally, riskier rollbacks | sfdx force:mdapi:deploy / retrieve |
+
+Use unlocked packages for new greenfield or long-term maintainability; use Metadata API for pragmatic short-term migrations. See [Salesforce Developer Docs](https://developer.salesforce.com/docs) for packageable metadata details.
+
+## How to handle destructive changes and rollback
+- Keep destructiveChanges.xml in a separate folder and apply it with mdapi deploy. Always run destructive deploys last and only on release jobs.
+- Rollback options:
+  - For locked-down production, use tag-based promotion and a dry-run to validate. If a deploy fails, revert the git tag/branch and re-run the pipeline.
+  - For metadata API failures, redeploy the previous commit artifact (store successful artifacts as GitHub release assets or package versions).
+  - Sandbox refresh or data restore is a last resort.
+
+Note: Metadata API deployments are not transactional across all metadata types; a failed deploy may partially apply changes. Design deployments to be small and reversible where possible.
+
+## Performance, limits, and org quota gotchas
+- Scratch org limits: limited daily active scratch orgs per Dev Hub. Reuse CI scratch orgs where possible or set short lifetimes.
+- Sandbox concurrency: Metadata API concurrent deployment limits and Sandbox refresh windows can block promotion. Schedule deployments during low-usage windows.
+- Apex test governor context: running all tests on production requires Test Level RunSpecifiedTests or RunLocalTests depending on changes; long test runs can hit CI job timeouts — use selective suites on feature branches.
+
+Review the Salesforce docs for current limits: [Salesforce Developer Docs](https://developer.salesforce.com/docs).
+
+## Common mistakes
+- **Running full production tests on every PR.** Run focused tests in scratch orgs; reserve full test runs for release pipelines. Fix: Create test suites and use RunSpecifiedTests where possible.
+- **Storing private keys insecurely.** Fix: Use GitHub Secrets for JWT keys and rotate regularly.
+- **Monolithic deploys.** Fix: Break source into packageable modules or deploy smaller metadata bundles to reduce blast radius.
+- **Not saving successful artifacts.** Fix: Upload package versions or mdapi zip artifacts as release assets for fast rollback.
+- **Assuming deploy is atomic.** Fix: Design reversible migrations and validate destructive changes in a sandbox first.
+
+## FAQ
+
+### How do I authenticate GitHub Actions to a Salesforce org?
+Authenticate using JWT-based auth with a Connected App and a private key stored as a GitHub Secret; run sfdx auth:jwt:grant in the workflow. See the sfdx CLI docs on auth in the Salesforce Developer Docs.
+
+### Can I run Apex tests in a scratch org only?
+Yes. Use scratch orgs for PR validation and run Apex tests there; full test runs against sandboxes or production should be reserved for release pipelines.
+
+### Should I use unlocked packages for all metadata?
+No. Use unlocked packages when you can modularize code and metadata. Keep Metadata API for legacy or non-packageable types. See the decision table above.
+
+### How do I rollback a failed deploy?
+Redeploy the last known-good artifact (package version or mdapi zip). Store artifacts from successful runs and use them for rollbacks; avoid manual hotfixes in production.
+
+### Where can I learn more about Apex limits referenced by CI failures?
+Read the Salesforce limits and Apex transaction docs on the Salesforce Developer Docs and review this site's guide on [Understanding Apex Transactions and Governor Limits in Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/understanding-apex-transactions-and-governor-limits-in-salesforce/index.mdx).
+
+### How do I make SOQL queries safe in CI-run integration tests?
+Write queries that use selective filters and indexes; see [Optimizing Salesforce SOQL Queries: Best Practices](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/optimizing-salesforce-soql-queries-best-practices-for-performance-and-limits/index.mdx) for guidance.
+
+Set up the YAML above in .github/workflows/ci.yml and add the npm scripts to package.json as your immediate next step. This gives you a reproducible CI pipeline you can adapt to unlocked packages or mdapi deploys depending on your org strategy.
+
