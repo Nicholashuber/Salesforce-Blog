@@ -1,0 +1,206 @@
+---
+title: "Scheduled Flow vs Scheduled Apex: exactly when to pick each for hourly,
+  daily and backfill jobs"
+date: 2026-10-01T09:00:00.000Z
+category: Administrator
+thumbnail: scheduled-flow-vs-scheduled-apex.png
+tags:
+  - Flow Builder
+  - Apex
+  - Batch Apex
+  - Scheduled Jobs
+  - Salesforce Automation
+  - Governor Limits
+keywords:
+  - scheduled flow vs scheduled apex
+  - scheduled apex
+  - schedule-triggered flow
+  - batch apex
+  - hourly scheduled apex
+  - backfill salesforce
+excerpt: "Scheduled Flow vs Scheduled Apex: choose Scheduled Flow for low-volume
+  daily/weekly automation with simple record updates; choose Scheduled Apex
+  (Queueable/Batch) when you need hourly precision, large-scale processing,
+  retries, or mixed-DML/backfill jobs. This guide gives a decision matrix, three
+  worked scenarios, click-by-click Flow recipes, and copy-paste Apex examples."
+---
+
+# Scheduled Flow vs Scheduled Apex: exactly when to pick each for hourly, daily and backfill jobs
+
+Short answer: Use a schedule-triggered Flow for low-volume, daily/weekly work that updates records in bulk and where built-in retries and admin visibility are enough. Use Scheduled Apex (Queueable/Batchable scheduled via System.schedule) when you need sub-daily precision, process tens of thousands-to-millions of rows, require controlled retries/error handling, or must perform mixed DML or long-running backfills.
+
+## How do scheduled Flow and scheduled Apex differ at a glance?
+
+| Criteria | Schedule-triggered Flow | Scheduled Apex (Queueable / Batchable) |
+|---|---:|---|
+| Typical cadence | Daily / weekly fits best | Hourly / minute precision available via CRON | 
+| Scale (records) | Best for hundreds to low thousands per run | Best for 10k → millions using Batch Apex with QueryLocator |
+| Transactions & limits | Single transaction per run; Flow-specific limits apply | Controlled per-batch transactions; standard Apex governor limits per execution ([docs](https://developer.salesforce.com/docs)) |
+| Error handling / retries | Flow shows failed runs in Setup; retries manual or via subflows | You control retries, logging, and completion callbacks in Apex |
+| Mixed DML / setup object changes | Risky in one transaction; generally avoid | Can design separate batches/transactions to avoid mixed DML |
+| Developer control | Low (clicks), fast to ship | High (fine-grained control, observability)
+
+Use this table as a starting point—read the worked scenarios below for concrete recommendations.
+
+## When should you pick Scheduled Flow vs Scheduled Apex? (decision matrix)
+
+- Choose Schedule-triggered Flow when:
+  - Your job runs daily/weekly and touches < ~5k records in practice.
+  - Work is simple: update fields, send emails, create related records (non-setup) without complex transactions.
+  - You want admin-friendly UI (Setup → Flows) and quick ownership handoff.
+
+- Choose Scheduled Apex when:
+  - You need hourly or minute precision.
+  - You must process > 10k records reliably or backfill historical data.
+  - You need robust retry/recovery, logging, or must avoid mixed DML.
+  - You need to chain work or call external APIs with rate controls.
+
+If you start in Flow and hit limits, call an Apex @InvocableMethod that enqueues a Batchable job—see "hand off to Batchable" later.
+
+## Worked scenario 1: Monthly MRR recalculation for 5M records (pick: Scheduled Apex Batch)
+
+Requirement: nightly run that recalculates MRR across 5M OpportunityLineItem-like records and updates aggregates on Account.
+
+Why Scheduled Apex: 5M records exceed Flow practical limits and must be chunked. Use Database.Batchable with a QueryLocator, scope tuned to 2000 (max). Schedule via a Schedulable wrapper.
+
+Apex Batch + Scheduler (copy-paste):
+
+```apex
+// MonthlyMRRBatch.cls
+global class MonthlyMRRBatch implements Database.Batchable<sObject>, Database.Stateful {
+    global Database.QueryLocator start(Database.BatchableContext bc) {
+        return Database.getQueryLocator([
+            SELECT Id, Amount, AccountId FROM OpportunityLineItem WHERE CloseDate >= LAST_N_DAYS:365
+        ]);
+    }
+
+    global void execute(Database.BatchableContext bc, List<sObject> scope) {
+        List<AggregateResult> aggr = new List<AggregateResult>();
+        // process scope in memory; update Account MRR in batches
+        Map<Id, Decimal> accountAdd = new Map<Id, Decimal>();
+        for (OpportunityLineItem oli : (List<OpportunityLineItem>) scope) {
+            accountAdd.put(oli.AccountId, (accountAdd.get(oli.AccountId) == null ? 0 : accountAdd.get(oli.AccountId)) + oli.Amount);
+        }
+        List<Account> accUpdates = new List<Account>();
+        for (Id accId : accountAdd.keySet()) accUpdates.add(new Account(Id=accId, MRR__c = accountAdd.get(accId)));
+        update accUpdates;
+    }
+
+    global void finish(Database.BatchableContext bc) {
+        // optional notification / logging
+    }
+}
+
+// Scheduler class
+global class MonthlyMRRScheduler implements Schedulable {
+    global void execute(SchedulableContext sc) {
+        Database.executeBatch(new MonthlyMRRBatch(), 2000);
+    }
+}
+
+// Schedule via System.schedule('Monthly MRR', '0 0 2 1 * ?', new MonthlyMRRScheduler());
+```
+
+Notes: Batch scope of 2000 maximizes throughput. Use QueryLocator for large result sets. Monitor via Setup → Apex Jobs. See the site's Batch Apex post for deeper patterns: [Automating Processes with Apex Batch Jobs in Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/automating-processes-with-apex-batch-jobs-in-salesforce/index.mdx).
+
+## Worked scenario 2: Hourly notification for 10k records (pick: Scheduled Apex or split Flow + Apex)
+
+Requirement: run every hour, find 10k records that need notification, send messages with per-record logic and external API calls.
+
+Why Scheduled Apex: hourly cadence + external API calls demand transaction control and retry logic. Use a small Batchable or Scheduled class that enqueues Queueable jobs per chunk to avoid long-running single transactions.
+
+Example: Scheduled class enqueues a Queueable worker per 1000-record chunk.
+
+```apex
+global class HourlyNotifier implements Schedulable {
+    global void execute(SchedulableContext sc) {
+        String q = 'SELECT Id, Email__c FROM CustomObject__c WHERE Needs_Notify__c = true';
+        for (List<sObject> chunk : Database.getQueryLocator(q).getChunks(1000)) {
+            System.enqueueJob(new NotifyQueueable((List<Id>)chunk.stream().map(o -> ((CustomObject__c)o).Id).collect(Collectors.toList())));
+        }
+    }
+}
+
+global class NotifyQueueable implements Queueable {
+    List<Id> ids;
+    public NotifyQueueable(List<Id> ids){ this.ids = ids; }
+    public void execute(QueueableContext ctx){
+        // fetch records, call external system with retry, handle failures
+    }
+}
+```
+
+(Adjust chunking to your org's API limits and callout limits.)
+
+## Worked scenario 3: Backfill historical data with mixed DML (pick: Scheduled Apex Batch with separated steps)
+
+If your backfill must update both setup objects (e.g., User, PermissionSetAssignment) and non-setup objects in the same business process, split work into distinct batches to avoid mixed DML errors. Run Batch A for setup changes, track progress in a custom object, then run Batch B for non-setup DML.
+
+Design pattern: Batch A (setup-only) -> on finish write checkpoint -> Schedule Batch B (non-setup) reading checkpoint. Use Database.Stateful if you need in-memory state per job.
+
+## How to create a schedule-triggered Flow (click-by-click recipe)
+
+1. Setup → Process Automation → Flows → New.
+2. Choose: Schedule-Triggered Flow → Set Start Date/Time and Frequency (Daily or Weekly). Note: Flows are best for daily/weekly cadences.
+3. Add Get Records (collect all records matching criteria). Limit to safe counts or add filters to keep results small.
+4. Use Update Records (use collection) — avoid looping element-by-element when possible.
+5. Save → Activate.
+
+If your Get Records returns many rows, add a Decision and subflows to process smaller batches or call an Apex @InvocableMethod that enqueues a Batchable.
+
+See the site’s Flow how-to for a worked admin example: [Automating Salesforce Record Updates with Scheduled Flows: A Step-by-Step Guide for Admins](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/administrator/automating-salesforce-record-updates-with-scheduled-flows-a-step-by-step-guide-for-admins/index.mdx).
+
+## How to hand off from Flow to Batchable when limits are hit
+
+- Add an Apex @InvocableMethod that accepts criteria or record IDs and starts Database.executeBatch(new YourBatch(args), scope).
+- In the Flow, after Get Records, call the Apex action with the collected IDs.
+- The Flow stays the admin-friendly trigger; Apex owns scale and retries.
+
+Example Invocable stub:
+
+```apex
+public with sharing class FlowToBatchInvoker {
+    @InvocableMethod(label='Start Big Batch')
+    public static void run(List<IdWrapper> inputs){
+        Database.executeBatch(new LargeProcessingBatch(inputs.get(0).ids), 2000);
+    }
+    public class IdWrapper { @InvocableVariable public List<Id> ids; }
+}
+```
+
+## Best practices
+
+- Prefer Flow for simple, low-volume schedules under admin ownership.
+- For any job that touches >10k records or needs sub-daily cadence, design as Batch Apex and schedule with System.schedule.
+- Always bulkify DML and SOQL; avoid SOQL/DML in loops. (See [Optimizing SOQL Queries for Performance in Apex](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/optimizing-soql-queries-for-performance-in-apex/index.mdx)).
+- Use QueryLocator in Batch for large data sets and tune scope to 200–2000 depending on CPU and heap.
+- Add idempotency and checkpoints for backfills so failed runs can resume without duplication.
+- Monitor jobs in Setup → Apex Jobs and Setup → Paused and Failed Flow Interviews.
+
+## Common mistakes (and how to fix them)
+
+- **Using Flow for million-row backfill.** Fix: switch to Batch Apex with QueryLocator and schedule the batch.
+- **Query/DML inside loops in Apex.** Fix: collect records in lists/maps and perform DML once per transaction; use maps for lookups.
+- **Attempting mixed DML in one transaction.** Fix: split into two batches or perform setup-object changes in a separate transaction.
+- **Assuming Flow can run hourly with precise minute alignment.** Fix: use Scheduled Apex for minute/cron precision and tighter SLA.
+- **No retry or logging for external callouts.** Fix: persist work items to a custom object and build a retry queue processed by Batch Apex.
+
+## FAQ
+
+### Can a scheduled Flow run hourly?
+Scheduled Triggered Flows are intended for daily/weekly cadences in the Flow Builder UI. For reliable hourly or minute-precision runs use Scheduled Apex (System.schedule with CRON) so you control exact timing and retries.
+
+### How many records can a schedule-triggered Flow process?
+Flow Get Records can return thousands but you will hit Flow run limits sooner than Apex. For high-volume processing (10k+), move to Batch Apex or hand off to Apex via an @InvocableMethod.
+
+### How do I retry a failed scheduled Apex job?
+Monitor failures in Setup → Apex Jobs. Implement retry logic in your Schedulable/Batch finish method or persist failures to a custom object and schedule a re-run that retries only failed items.
+
+### Where do I monitor Flow failures?
+Setup → Paused and Failed Flow Interviews lists failed flow runs with the error message and input payload for troubleshooting.
+
+### Should I always pick Apex for large jobs?
+Yes for scale and control, but prefer a hybrid: use Flow for orchestration and an Apex Batch for heavy lifting. That gives admins a readable flow while Apex handles throughput.
+
+Schedule the right tool for the job: Flows for admin-owned, low-volume schedules; Scheduled Apex for precision, scale, and complex transactions.
+
