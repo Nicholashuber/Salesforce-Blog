@@ -1,0 +1,190 @@
+---
+title: "SOQL anti-join patterns: find parent records without children at scale"
+date: 2026-10-05T09:00:00.000Z
+category: Developer
+thumbnail: soql-anti-join-find-parent-records-without-children-keyset-queries.png
+tags:
+  - SOQL
+  - Apex
+  - Performance
+  - Developer
+  - Data Modeling
+keywords:
+  - SOQL anti-join
+  - NOT IN subquery
+  - find records without children
+  - keyset pagination SOQL
+  - SOQL parent child pattern
+  - Apex batch anti-join
+excerpt: "SOQL anti-join patterns show four production-ready ways to find
+  parents with no children: NOT IN subquery, parent query with child LIMIT 1
+  (keyset-ready), maintained HasChildren flags / roll-ups, and child-aggregate
+  exclusion. Each approach includes copy-paste SOQL/Apex, limits, and a decision
+  table."
+---
+
+# SOQL anti-join patterns: find parent records without children at scale
+
+Short answer
+
+Use one of four safe patterns depending on scale and latency: (1) a simple NOT IN subquery for small sets, (2) query the parent with a child subquery limited to 1 and use keyset/batch pagination for large volumes, (3) maintain a HasChildren/child_count roll-up and query that indexed field, or (4) build a child-aggregate list of parents-to-exclude then fetch parents not in that list (only for mid-scale). Below are copy-paste SOQL and Apex examples, governor-limit tradeoffs, a decision table, test-data scripts, and a debugging checklist.
+
+## Which SOQL anti-join should I try first?
+
+Start with the simplest: use NOT IN with a subquery when both the parent set and child set are small and you need one-shot results in a synchronous transaction.
+
+- Example (find Accounts with no Contacts):
+
+```sql
+SELECT Id, Name
+FROM Account
+WHERE Id NOT IN (SELECT AccountId FROM Contact)
+```
+
+Why this works: SOQL supports semi/anti-joins with subqueries. Downsides are practical: subqueries that return very large result sets or long-running queries can break transactions or hit limits.
+
+Refer to the reference on governor limits for total rows retrieved and query behavior: https://developer.salesforce.com/docs
+
+## How do I scale this pattern (keyset-ready parent + child LIMIT 1)?
+
+When you must process millions of parents, avoid a large NOT IN. Instead page parents and load at most one child per parent; check existence in Apex. This is production-safe, bulkified, and works with keyset pagination or Batchable.getQueryLocator.
+
+1) SOQL to fetch a page of parents with a single child preview:
+
+```sql
+SELECT Id, Name, (SELECT Id FROM Contacts LIMIT 1)
+FROM Account
+WHERE Id > :lastId
+ORDER BY Id
+LIMIT :batchSize
+```
+
+2) Minimal keyset-style Apex (synchronous loop or scheduled job):
+
+```apex
+// Apex - keyset paging pattern (process pages until none left)
+public static void processAccountsWithoutContacts(Integer batchSize) {
+    Id lastId = null;
+    while (true) {
+        List<Account> rows = [
+            SELECT Id, Name, (SELECT Id FROM Contacts LIMIT 1)
+            FROM Account
+            WHERE (:lastId = NULL OR Id > :lastId)
+            ORDER BY Id
+            LIMIT :batchSize
+        ];
+        if (rows.isEmpty()) break;
+
+        List<Account> noChildren = new List<Account>();
+        for (Account a : rows) {
+            if (a.Contacts == null || a.Contacts.isEmpty()) {
+                noChildren.add(a);
+            }
+        }
+
+        // Do your work with noChildren in bulk
+        // e.g., update, enqueue job, build export
+
+        lastId = rows[rows.size()-1].Id;
+        if (rows.size() < batchSize) break; // finished
+    }
+}
+```
+
+Notes: ORDER BY Id and WHERE Id > :lastId is a keyset pattern that avoids OFFSET. Set batchSize to a safe number (200–2000) for synchronous; use Batch Apex for larger processing.
+
+## When should I maintain a HasChildren flag or roll-up summary instead?
+
+If you repeatedly need “parent without children” queries (reporting, lists, automation), maintaining an indexed boolean (Has_Contacts__c) or a numeric roll-up (Contact_Count__c) is the most performant option.
+
+- Setup paths: use a native roll-up summary if the child is master-detail, or use a trigger / Platform Event / scheduled batch / DLRS for lookups.
+- Query becomes trivial and selective:
+
+```sql
+SELECT Id, Name FROM Account WHERE Has_Contacts__c = false
+```
+
+Tradeoffs: you accept additional write cost and complexity on child operations, but reads become O(1) and highly scalable.
+
+## Can I use a child-aggregate + HAVING pattern to find parentless records?
+
+No. Aggregate queries only return groups that exist. You cannot HAVING COUNT() = 0 to create a group that does not exist. The common variant is reverse: aggregate to get parents that DO have children, then exclude those parents. That works at mid-scale when the excluded set is reasonably sized.
+
+- Example (build exclusion set):
+
+```sql
+SELECT AccountId FROM Contact GROUP BY AccountId
+```
+
+Then in Apex:
+
+```apex
+Set<Id> parentsWithChildren = new Set<Id>();
+for (AggregateResult ar : [SELECT AccountId FROM Contact GROUP BY AccountId]) {
+    parentsWithChildren.add((Id)ar.get('AccountId'));
+}
+List<Account> parents = [SELECT Id, Name FROM Account WHERE Id NOT IN :parentsWithChildren];
+```
+
+This avoids a NOT IN subquery but still materializes the child parent-id set into memory. Do not use if parentsWithChildren is large (tens of thousands) — you'll hit heap / CPU limits.
+
+## Decision table: use this when… vs avoid this when…
+
+| Approach | Use when | Avoid when |
+|---|---:|---|
+| NOT IN subquery | One-off query, small child set (<50k rows returned), synchronous convenience | Child subquery returns many rows or you need pagination/scalability |
+| Parent query + child LIMIT 1 (keyset) | Large parent table, you can page or run Batch Apex, need exact current-state detection | You need an instantaneous indexed filter for UI lists (prefer HasChildren) |
+| HasChildren / roll-up | Frequent reads, lists, automation, or UI performance needs | You cannot change write-side logic or accept extra writes |
+| Child aggregate → exclude set | Mid-scale jobs where exclusion set fits memory and you prefer server-side grouping | Exclusion set grows huge; memory/governor limits unsafe |
+
+## Test data: quick anonymous script to create parents and children
+
+```apex
+// Apex anonymous - create 500 accounts, attach contacts to 200 of them
+List<Account> accts = new List<Account>();
+for (Integer i=0;i<500;i++) accts.add(new Account(Name='Acct '+i));
+insert accts;
+List<Contact> contacts = new List<Contact>();
+for (Integer i=0;i<200;i++) {
+    contacts.add(new Contact(FirstName='C'+i, LastName='L', AccountId=accts[i].Id));
+}
+insert contacts;
+```
+
+Run the keyset paging example above against these records to validate results.
+
+## Common mistakes (and the fix)
+
+- **Using NOT IN for very large child sets** — Fix: switch to keyset paging with parent query + child LIMIT 1, or use Batch Apex with a query locator.
+- **Trying to COUNT() = 0 via HAVING** — Fix: aggregate queries return only existing groups; instead maintain a roll-up or use parent-side child subquery to detect absence.
+- **Pulling all parent IDs into Apex for exclusion** — Fix: if the exclusion set is > tens of thousands, process in batches or use a persisted HasChildren field.
+- **Using OFFSET for deep paging** — Fix: OFFSET is inefficient above small offsets. Use keyset WHERE Id > :lastId pattern or Database.getQueryLocator in Batchable.
+- **Filtering on child subquery in WHERE** (e.g., WHERE (SELECT Id FROM Contacts) = NULL) — Fix: SOQL does not allow subqueries in WHERE that way; fetch the child subquery in SELECT and check in Apex.
+
+## Debugging checklist: why rows are missing from my anti-join
+
+- Are you filtering by Sharing/OWD? Run as System Admin or include WITH SECURITY_ENFORCED to confirm sharing effect.
+- Is a roll-up or HasChildren field stale? Check the last-modified timestamps or the trigger logs that maintain it.
+- Did the child records have the lookup populated (AccountId) or are they orphaned/unlinked?
+- Did your NOT IN subquery return NULLs or unexpected parent IDs? Inspect the child query alone first.
+- Are you hitting a governor limit or query timeout? Check debug logs for SOQL timeouts or CPU limits.
+
+## FAQ
+
+### What is the safest pattern for millions of parent records?
+Use Batchable with Database.getQueryLocator over the parent object and include a child subquery LIMIT 1. Process each batch and detect parents without children in execute(). This scales to platform limits and avoids building huge exclusion sets in memory.
+
+### Why doesn’t SELECT … HAVING COUNT() = 0 work?
+Aggregate queries only return groups for values that exist. A parent with zero children yields no group in the child aggregate, so HAVING cannot produce a zero-count group for absent children.
+
+### Is NOT IN slower than a parent-side child subquery approach?
+NOT IN pushes the anti-join to the server and can be efficient for small child sets. For large child sets or frequent queries, a parent-side child subquery (LIMIT 1) with keyset pagination or a maintained HasChildren field is more predictable and scalable.
+
+### Can I use OFFSET when paging results for anti-join queries?
+Avoid OFFSET for deep paging — it's inefficient and bounded. Use keyset pagination (WHERE Id > :lastId ORDER BY Id LIMIT n) or Batch Apex with a query locator.
+
+### Where can I read more about SOQL joins and optimizing queries?
+See our deeper primer on joins: "The Ultimate Guide to SOQL Joins in Salesforce" and the platform guide "Optimizing SOQL Queries for Performance in Apex" for related patterns and index/selectivity guidance.
+
+Select the approach above that matches your read/write profile. If you run high-frequency reads, add a HasChildren or child_count roll-up; if you process once or periodically, use keyset paging with a child LIMIT 1 subquery.
+
