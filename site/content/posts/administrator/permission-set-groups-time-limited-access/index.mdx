@@ -1,0 +1,218 @@
+---
+title: "Permission Set Groups time-limited access: design, Flows, and Apex recipes"
+date: 2026-10-08T09:00:00.000Z
+category: Administrator
+thumbnail: permission-set-groups-time-limited-access.webp
+tags:
+  - Permission Set Groups
+  - Flow
+  - Apex
+  - Security
+  - Administrator
+  - DevOps
+keywords:
+  - Permission Set Groups time-limited access
+  - time-limited permission set group
+  - just-in-time access Salesforce
+  - break-glass permission set group
+  - PermissionSetGroupAssignment Flow
+  - temporary permission set group assignment
+excerpt: Permission Set Groups time-limited access gives you just-in-time
+  elevation and break-glass workflows using Flow and Apex. This guide shows data
+  model choices, three Flow recipes (time-bound assignment, automatic expiry,
+  approval-backed emergency elevation) with exported Flow JSON snippets, Apex
+  alternatives for auditability, and an operational testing matrix for 1k–100k
+  user orgs.
+---
+
+# Permission Set Groups time-limited access: design, Flows, and Apex recipes
+
+Short answer
+
+Permission Set Groups time-limited access is the pattern of granting a user membership in a Permission Set Group (PSG) for a limited window, then removing it automatically. Use a small Assignment custom object + record-triggered Flows with scheduled paths for most cases; use a short Apex @Invocable service when you need Approval API calls, audit records, or cross-org scale.
+
+## Why use time-limited Permission Set Groups?
+
+You need just-in-time elevation for contractors, temporary projects, or emergency “break-glass” access without creating permanent permission creep. Time-limited PSG assignments centralize privileges, make audits simpler, and let you automate expiry so human reviewers don’t have to remember to remove access.
+
+## What data model should you use: Assignment object vs direct PSG membership?
+
+Recommended model (production-friendly):
+
+- Create a lightweight custom object: Assignment__c
+  - Fields: Assignee__c (Lookup User), Permission_Set_Group__c (Lookup PermissionSetGroup), Start_Date__c (DateTime), Expiration_Date__c (DateTime), Status__c (Picklist: Requested, Active, Expired, Revoked), Source__c (Picklist: Manual, Flow, Approval)
+  - Benefits: one record per grant, easy reports, FLS on audit fields, scheduled-path friendly.
+
+Why not just create PermissionSetGroupAssignment directly from UI/Flow? Direct PSG assignment works but is hard to report on (historic grants disappear when removed) and harder to guard with approval flows. Using Assignment__c gives an auditable single source of truth and a place to attach approval metadata and comments.
+
+Pros/Cons summary
+
+- Assignment custom object: audit-friendly, easy reporting, works with Scheduled Paths. Slightly more work to implement.
+- Direct PSG membership: fewer records, immediate effect, but poor audit trail and reporting on expired grants.
+
+## How to implement: Flow recipe 1 — Time-bound assignment (record-triggered Flow)
+
+When a requester creates Assignment__c with Start_Date and Expiration_Date, the Flow creates the PermissionSetGroupAssignment and moves to Active. Use a record-triggered flow with a Scheduled Path at Expiration_Date to remove the PSG assignment.
+
+Steps (Setup breadcrumbs included):
+1. Setup → Process Automation → Flows → New → Record-Triggered Flow.
+2. Object: Assignment__c. Trigger: When record is created or updated. Condition: Status__c = "Requested".
+3. Immediate path: Create PermissionSetGroupAssignment (sObject API name: PermissionSetGroupAssignment), set AssigneeId = Assignment__c.Assignee__c, PermissionSetGroupId = Assignment__c.Permission_Set_Group__c; update Assignment__c.Status__c = Active.
+4. Scheduled Path: Add Scheduled Path run at {!$Record.Expiration_Date__c} — inside it, remove the PSG membership and set Assignment__c.Status__c = Expired.
+
+Minimal exported Flow JSON snippet (trimmed to key nodes):
+
+```json
+{
+  "apiVersion": 60.0,
+  "label": "FT_TimeBound_Assignment",
+  "triggerType": "Record",
+  "object": "Assignment__c",
+  "startConditions": [{"field":"Status__c","operator":"Equals","value":"Requested"}],
+  "elements": [
+    {"type":"Create","label":"Create PSG Assignment","object":"PermissionSetGroupAssignment","values":{"AssigneeId":"{!$Record.Assignee__c}","PermissionSetGroupId":"{!$Record.Permission_Set_Group__c}"}},
+    {"type":"ScheduledPath","label":"Expire Path","runAt":"{$Record.Expiration_Date__c}","actions":[{"type":"Delete","object":"PermissionSetGroupAssignment","filter":[{"field":"AssigneeId","operator":"Equals","value":"{!$Record.Assignee__c}"},{"field":"PermissionSetGroupId","operator":"Equals","value":"{!$Record.Permission_Set_Group__c}"}]} ,{"type":"Update","object":"Assignment__c","values":{"Status__c":"Expired"}}]}
+  ]
+}
+```
+
+Notes: When creating PermissionSetGroupAssignment in Flow, use Create Records with API name PermissionSetGroupAssignment and the proper field names (AssigneeId and PermissionSetGroupId). Test with a sandbox user.
+
+## How to implement: Flow recipe 2 — Automatic expiry reconcile job
+
+Scheduled Paths are reliable for most orgs, but sharing recalculation or manual changes can orphan PSG membership. Add a nightly Scheduled Flow (Setup → Flows → New → Scheduled-Triggered Flow) to reconcile:
+
+- Query active Assignment__c where Expiration_Date__c <= TODAY and Status__c = Active.
+- For each record, DELETE PermissionSetGroupAssignment where AssigneeId = Assignee__c and PermissionSetGroupId = Permission_Set_Group__c, then update Status__c = Expired.
+
+This scheduled reconciliation protects you from missed scheduled-path runs or manual deletes.
+
+Exported Flow JSON snippet (reconciliation loop):
+
+```json
+{
+  "label": "FT_PSG_Reconcile_Nightly",
+  "triggerType": "Scheduled",
+  "schedule": "0 2 * * *",
+  "elements": [
+    {"type":"GetRecords","object":"Assignment__c","filter":[{"field":"Status__c","operator":"Equals","value":"Active"},{"field":"Expiration_Date__c","operator":"LessThanOrEqual","value":"{!$Flow.CurrentDate}"}]},
+    {"type":"Loop","collection":"{!records}","actions":[{"type":"Delete","object":"PermissionSetGroupAssignment","filter":[{"field":"AssigneeId","operator":"Equals","value":"{!loop.Assignee__c}"},{"field":"PermissionSetGroupId","operator":"Equals","value":"{!loop.Permission_Set_Group__c}"}]},{"type":"Update","object":"Assignment__c","values":{"Status__c":"Expired"}}]}
+  ]
+}
+```
+
+## How to implement: Flow recipe 3 — Approval-backed emergency elevation
+
+Business scenario: On-call engineer needs break-glass PSG for 4 hours; manager approval required but must be auditable.
+
+Pattern:
+1. Requester runs a Screen Flow (Setup → Flows → New → Screen Flow) that creates Assignment__c with Status__c = Requested and Source__c = "Emergency".
+2. Flow calls an Apex @Invocable to submit the Assignment__c record into the org approval process (Approval.ProcessSubmitRequest) and returns the approval result.
+3. On approval outcome, the record-triggered Flow (from recipe 1) creates the PSG assignment and sets Start/Expiration.
+4. Include a short automatic expiry (Start + 4 hours) via Scheduled Path.
+
+Apex helper to submit for approval (bulkified, invocable):
+
+```apex
+public with sharing class ApprovalInvoker {
+  public class Request { @InvocableVariable public Id recordId; @InvocableVariable public String comments; }
+
+  @InvocableMethod(label='Submit for Approval')
+  public static List<String> submit(List<Request> requests){
+    List<String> results = new List<String>();
+    for(Request r : requests){
+      Approval.ProcessSubmitRequest req = new Approval.ProcessSubmitRequest();
+      req.setObjectId(r.recordId);
+      req.setComments(r.comments);
+      try{
+        Approval.ProcessResult pr = Approval.process(req);
+        results.add(pr.isSuccess() ? 'SUBMITTED' : 'FAILED');
+      } catch(Exception ex){
+        results.add('ERROR: '+ex.getMessage());
+      }
+    }
+    return results;
+  }
+}
+```
+
+Use this class in your Screen Flow with an Action element. Keep test coverage thorough: test approved and rejected paths.
+
+## Apex alternatives for auditability and scale
+
+If you need centralised audit logs and retry semantics across 100k users, prefer Apex for the create/delete steps and the reconciliation job. Example bulk-safe Queueable to remove expired assignments:
+
+```apex
+public class PSGExpiryProcessor implements Queueable, Database.AllowsCallouts {
+  public Set<Id> assignmentIds;
+  public PSGExpiryProcessor(Set<Id> ids){ assignmentIds = ids; }
+  public void execute(QueueableContext ctx){
+    List<Assignment__c> assigns = [SELECT Id, Assignee__c, Permission_Set_Group__c FROM Assignment__c WHERE Id IN :assignmentIds AND Status__c='Active'];
+    List<PermissionSetGroupAssignment> toDelete = new List<PermissionSetGroupAssignment>();
+    for(Assignment__c a : assigns){
+      for(PermissionSetGroupAssignment p : [SELECT Id FROM PermissionSetGroupAssignment WHERE AssigneeId = :a.Assignee__c AND PermissionSetGroupId = :a.Permission_Set_Group__c]){
+        toDelete.add(p);
+      }
+    }
+    if(!toDelete.isEmpty()) delete toDelete;
+    for(Assignment__c a : assigns){ a.Status__c = 'Expired'; }
+    update assigns;
+  }
+}
+```
+
+Governors: queries and DML are bulkified; keep batch size under 200. Use Queueable chaining or Batch Apex for full-org reconciliation (recommended for 100k+ users).
+
+## Common mistakes and how to avoid them
+
+- **Expecting Flow scheduled paths to always fire —** run a nightly Scheduled Reconcile Flow to catch missed expirations.
+- **Not protecting FLS/Field Visibility —** run PSG assignment logic in system context only after validating user field visibility; store audit copies of any fields that need restricted access.
+- **Updating PermissionSetGroupAssignment IDs directly from UI reports —** these IDs are ephemeral; always query by AssigneeId+PermissionSetGroupId when deleting.
+- **No audit trail for emergency approvals —** attach approval IDs, approver comments, and timestamps on Assignment__c.
+- **Scaling a per-user Flow to 100k users —** move heavy reconciliation into Batch Apex or Queueables and keep Flows for request paths only.
+
+## Operational runbook (quick)
+
+- Request: User creates Assignment__c via Screen Flow or Service Console component.
+- Approve: Approval Process triggers Apex Action (ApprovalInvoker) if needed.
+- Grant: Record-triggered Flow creates PermissionSetGroupAssignment and marks Assignment__c Active.
+- Expire: Scheduled Path or nightly reconcile removes PSG membership and sets Assignment__c Expired.
+- Audit: Weekly report on Assignment__c where Status__c != Expired.
+
+## Testing matrix for org size
+
+- 1k users: Unit tests + Sandbox QA. Test flows end-to-end with multiple concurrent requests (5–10 simultaneous).
+- 10k users: Add integration test for nightly reconcile with sample of 1k active Assignment__c records; run load tests for scheduled-flow concurrency.
+- 100k users: Use Batch Apex for reconciliation. Run full-scale dry-run in a partial-copy sandbox; validate governor limits, indexing on Assignment__c Expiration_Date__c, and query selective filters.
+
+Test cases (each env): create request, approve, auto-expire, revoke early, manual assignment deletion, reconcile after manual PSG deletion.
+
+## FAQ
+
+### How do I assign a Permission Set Group programmatically?
+
+Insert a PermissionSetGroupAssignment record with AssigneeId (User Id) and PermissionSetGroupId. In Flows use Create Records on the PermissionSetGroupAssignment object.
+
+### Can a scheduled-path Flow handle thousands of expirations in one run?
+
+No. Large batches risk CPU and SOQL limits. For tens of thousands of expirations use Batch Apex or split the work into chunks and Queueable jobs.
+
+### Where do I report on historical grants?
+
+Use the Assignment__c custom object as your historical record. Reports on PermissionSetGroupAssignment only show current state.
+
+### Do approval processes work with Flows?
+
+Yes. Use an Approval Process on Assignment__c and submit from Flow either with a Flow action or an Apex @Invocable like ApprovalInvoker shown above.
+
+### What Salesforce docs should I read for APIs and objects used here?
+
+See the Salesforce Developer Docs for object and API details: https://developer.salesforce.com/docs
+
+
+Final step: create the Assignment__c object and a small sandbox Flow to validate one happy path request, approval, grant, and automated expiry.
+
+
+Related reading: see "Apex Triggers: Best Practices and Common Pitfalls" for trigger patterns you may use when mixing triggers and Flows, and "Boosting Salesforce Performance with Custom Metadata Types: A Complete Guide" when you externalize PSG IDs and expiry defaults for multi-environment deployment.
+
+
