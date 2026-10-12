@@ -1,0 +1,184 @@
+---
+title: "Pardot quick start: connect, sync prospects, and send your first
+  automated nurture in 2 hours"
+date: 2026-10-12T09:00:00.000Z
+category: Marketing
+thumbnail: pardot-quick-start-connect-sync-prospects-send-first-nurture-2-hours.png
+tags:
+  - Pardot
+  - Account Engagement
+  - Marketing Automation
+  - Salesforce Connector
+  - Engagement Studio
+keywords:
+  - pardot quick start
+  - pardot connector settings
+  - pardot prospect sync
+  - engagement studio quick start
+  - pardot field mapping
+excerpt: "Pardot quick start: a hands-on playbook to install the Salesforce
+  connector, map fields, set minimal scoring & grading, create an Automation
+  Rule and an Engagement Studio nurture, and validate sync — all in about two
+  hours for a Salesforce-connected org."
+---
+
+# Pardot quick start: connect, sync prospects, and send your first automated nurture in 2 hours
+
+Short answer
+
+Follow this playbook to be live fast: install and authorize the Salesforce connector with a dedicated API user, import a small field-mapping CSV, enable only the essential scoring & grading rules, create one Automation Rule to tag inbound prospects and an Engagement Studio program to send a 3-email nurture, then validate using the connector logs and a Salesforce report. Expect to be live in ~2 hours if you prepare the CSV and a test list first.
+
+## What do you need before you start?
+
+- A Salesforce org with API access and one sandbox or production environment for the initial run. The connector user must have API, Modify All Data, and access to the Lead and Contact objects.  
+- A Pardot (Account Engagement) business unit and an Admin user in Pardot.  
+- A prepared CSV mapping file for your core fields (email, first name, last name, company/account, owner).  
+- One test list of 20 prospect emails to validate journey and sync.
+
+## How to connect Salesforce and Pardot (exact connector settings)
+
+1. Prepare the connector user in Salesforce: Setup → Users → Users → New User. Create a dedicated API user named pardot.connector@example.com with a standard Profile that includes API Enabled and Modify All Data. Assign a role and a static Queue/Team if you will use queue ownership.  
+2. In Pardot (Lightning App): Pardot Settings → Connectors → + Add Connector → Salesforce. Click Authorize and log in as the dedicated connector user.  
+3. Connector options (set exactly as recommended here):  
+   - Sync Behavior: Enable bi-directional sync (default).  
+   - Prospect creation: Allow Pardot to create Prospects from Salesforce Leads/Contacts = ON if you expect inbound records.  
+   - Object Mapping: Map Prospects to Lead and Contact (PersonAccount optional).  
+   - Match by: Email (primary).  
+   - Sync queue: Standard (do not enable bulk disable).  
+4. After authorization, monitor the initial full sync in Pardot: Pardot Settings → Connectors → Salesforce → View Connector Health → Initial Sync. Wait for the ‘Synced’ status.
+
+Note: the connector user must not be deactivated or its password changed during initial sync.
+
+## How to map fields quickly (copy-paste field-mapping CSV)
+
+Create a CSV with the minimal fields you must sync. Save as UTF-8. Import when you go to Pardot Settings → Object and Field Mappings → Import Mapping.
+
+```csv
+Salesforce Field API Name,Pardot Field Name,Type,Notes
+Email,Email,email,Primary match field
+FirstName,First Name,text,
+LastName,Last Name,text,
+Company,Company,text,Map to Account.Name for Leads
+Title,Job Title,text,
+Phone,Phone,phone,
+OwnerId,Owner,owner,Salesforce owner sync
+LeadSource,Source,select,List or picklist
+CreatedDate,Created At,datetime,Read-only
+```
+
+Import that CSV in Pardot field mapping and verify a small sample record maps correctly before importing broadly.
+
+## How to configure the minimal scoring & grading (production-focused)
+
+- Scoring (Pardot): keep it simple for launch. Admin → Scoring Rules:  
+  - Email Open = +1  
+  - Click = +3  
+  - Form Completion = +10  
+  - Page View of a key product page = +2  
+- Grading: Admin → Grading → Create a profile called "Core ICP" with grade factors (Industry +3, Employee Range +2, Title contains "Manager" +2). Use only 3 criteria at launch.  
+- Thresholds: Set an initial score to trigger qualification (e.g., Score >=15) and a grade threshold (e.g., B or higher). Keep numeric values conservative; you can tune after two weeks of data.
+
+## How to create the first Automation Rule and Engagement Studio nurture (step-by-step)
+
+Automation Rule (fast tag + sync to Salesforce Campaign):  
+1. Pardot → Marketing → Automation → Automation Rules → + Add Automation Rule.  
+2. Rule Name: "Inbound Web Form — Tag & Sync".  
+3. Rule: Prospect form submission is any of [Product Interest Form].  
+4. Actions: Add tag "form-product-interest"; Add prospect to list "Product Interest List"; Add to Salesforce Campaign "Product Interest".  
+5. Save and run against the test list only.
+
+Engagement Studio (3-email nurture):  
+1. Pardot → Marketing → Engagement Studio → + New Program.  
+2. Program settings: Sender name, reply-to, suppression lists include Unsubscribe list.  
+3. Canvas:  
+   - Trigger: Prospect is added to list "Product Interest List".  
+   - Send Email 1 (Welcome/Intro). Wait 3 days.  
+   - Decision: Did prospect click email 1?  
+     - If yes → Send Email 2 (Demo invite).  
+     - If no → Send Email 2 (Reminder).  
+   - Wait 5 days → Send Email 3 (Case study / CTA).  
+4. Activate program and monitor the first 20 prospects.
+
+Copy-pasteable Prospect JSON for marketers (Pardot API v5 style):
+
+```json
+{
+  "prospect": {
+    "email": "jane.doe@example.com",
+    "first_name": "Jane",
+    "last_name": "Doe",
+    "company": "Acme Corp",
+    "job_title": "Product Manager",
+    "phone": "+1-555-555-5555",
+    "assigned_user_id": "1234567890",
+    "crm_lead_id": null
+  }
+}
+```
+
+Sample Engagement Studio program skeleton (JSON):
+
+```json
+{
+  "engagement_program": {
+    "name": "Product Interest - 3 Email Nurture",
+    "triggers": [{"type": "list_add", "list_id": 98765}],
+    "steps": [
+      {"type": "send_email", "email_id": 111},
+      {"type": "wait", "days": 3},
+      {"type": "decision", "condition": "clicked_email", "email_id": 111},
+      {"type": "send_email", "email_id": 112},
+      {"type": "wait", "days": 5},
+      {"type": "send_email", "email_id": 113}
+    ]
+  }
+}
+```
+
+## How to validate the sync and measure success
+
+- Connector logs: Pardot Settings → Connectors → Salesforce → Connector Health → Sync Queue and Errors. Look for zero errors and a completed initial sync.  
+- Spot-check records: Pick 10 prospects and confirm a matching Lead/Contact in Salesforce with the same email, Owner, and mapped fields.  
+- Salesforce report: Setup → Reports → New Report → Leads & Contacts (or Leads) → Add filter Email equals [test emails]. Add columns for Owner, Created Date, and custom Pardot fields (Pardot Score/Grade visible via the synced fields).  
+- Engagement metrics: Engagement Studio → Program → Reporting → Opens, Clicks, Unsubscribes. Use these numbers for tuning scoring after week 1.
+
+## Rollback checklist (fast safe undo if something goes wrong)
+
+1. Pause or deactivate Engagement Studio program.  
+2. Disable the Automation Rule.  
+3. In Pardot Settings → Connectors → Salesforce, temporarily disable sync (if you must stop writes to Salesforce).  
+4. Restore field mappings from the CSV backup or revert to backups in Pardot.  
+5. If incorrect prospects were created in Salesforce, run a report to identify and mass-delete records created in the window (use Data Loader with WHERE CreatedDate filters).  
+6. Communicate to Sales: set a short window where owners temporarily ignore Pardot-created assignments until rollback completes.
+
+## Common mistakes (and how to avoid them)
+
+- **Not using a dedicated connector user** — causes ownership churn when passwords reset; fix by creating a dedicated API user and never tying it to a person.  
+- **Mapping too many fields at launch** — causes sync errors and long initial syncs; fix by mapping only essential fields, then expand.  
+- **Running Engagement Studio against a full database** — can spam your database; fix by testing with a small list first.  
+- **Expecting immediate score/grade parity** — scores and grades may backfill slowly; fix by allowing 24–48 hours and monitoring connector queue.  
+- **Not exporting a mapping backup before changes** — leaves you unable to rollback quickly; fix by exporting the CSV before any mapping edits.
+
+## FAQ
+
+### How long does the initial Pardot sync take?
+
+It depends on the number of records; 1–10k prospects is usually 30–90 minutes, but larger datasets can take hours. Watch the Connector Health screen for progress.
+
+### What Salesforce permissions does the connector user need?
+
+API Enabled, Modify All Data, read/write access to Lead and Contact (and Person Account) fields you plan to sync. Avoid using an SSO-only account.
+
+### How do I prevent duplicate leads from Pardot sync?
+
+Match by email, enable duplicate management rules in Salesforce for Leads and Contacts, and test with a controlled import. If duplicates occur, use the Duplicate Management guide or the Pardot merge tools.
+
+### Can I use Permission Set Groups to give the connector user permissions?
+
+Yes. Grant the API/CRUD permissions via a Permission Set assigned to the connector user; Permission Set Groups are preferred over modifying Profiles.
+
+### Where can I read more about Pardot field mapping best practices?
+
+See the Pardot connector setup guidance and Salesforce Developer Docs for API mapping patterns; for general automation hygiene, see our post "Maximizing Marketing Potential: Setting Up Pardot with Salesforce" and for journey design reference, see "Email Marketing Automation: Enhancing Efficiency with Salesforce Journey Builder".
+
+For a practical next step, prepare your connector user and the mapping CSV so you can follow this playbook in a single 2-hour session.
