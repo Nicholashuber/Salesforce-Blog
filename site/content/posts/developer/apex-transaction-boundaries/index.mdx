@@ -1,0 +1,186 @@
+---
+title: "Apex transaction boundaries: exactly when commits, rollbacks, savepoints
+  and mixed‑DML happen"
+date: 2026-10-19T09:00:00.000Z
+category: Developer
+thumbnail: apex-transaction-boundaries.png
+tags:
+  - Apex
+  - Transactions
+  - Triggers
+  - Mixed DML
+  - Testing
+  - Governors
+keywords:
+  - Apex transaction boundaries
+  - apex transactions
+  - mixed DML
+  - savepoint rollback Apex
+  - Apex commit when
+  - Test.startTest Test.stopTest savepoint
+excerpt: Apex transaction boundaries explain exactly when Salesforce commits or
+  rolls back DML, how savepoints work inside a transaction, why mixed‑DML throws
+  and how it leads to partial writes when you split work across async
+  boundaries. Read testable examples (System.runAs + mixed DML) and a decision
+  table for synchronous vs batch vs platform-event patterns.
+---
+
+# Apex transaction boundaries: exactly when commits, rollbacks, savepoints and mixed‑DML happen
+
+Short answer: An Apex transaction commits only when that transaction completes (synchronous request, trigger run, future/Queueable execution, each Batch.execute chunk, scheduled job execution, REST API call). Savepoints and Database.rollback() operate only inside the same transaction. Mixed‑DMLException is thrown when you try setup-object DML (User, Group, etc.) and non‑setup DML in the same synchronous transaction; the usual fixes are run the setup DML asynchronously or separate the work into a different transaction. Use Test.startTest()/Test.stopTest() to assert async outcomes in unit tests.
+
+## What is an Apex transaction boundary and when does a commit happen?
+
+An Apex transaction boundary is the unit of work Salesforce executes atomically. Common transaction boundaries:
+
+- A single UI save → triggers → workflow → after triggers run → then commit at transaction end.
+- Each execute() chunk of a Batchable is its own transaction.
+- Each Queueable or @future execution is a separate transaction.
+- Each scheduled Apex run and each REST/SOAP API request is a transaction.
+
+Salesforce does not issue partial commits inside a single transaction. If the transaction finishes normally, Salesforce commits all DML. If the transaction throws an unhandled exception, Salesforce rolls back to the state before the transaction started (unless prior work already committed in earlier, separate transactions).
+
+## How do savepoints and Database.rollback behave across triggers and async work?
+
+- Savepoints are scoped to the current transaction only. Create with Database.setSavepoint(); roll back with Database.rollback(savepoint).
+- You cannot roll back or reference a savepoint from a different transaction (e.g., inside a Queueable or Batch chunk). Attempting to do so is invalid.
+- If you call Database.rollback(savepoint) inside a trigger, it undoes any DML performed after that savepoint in the same transaction (including DML by earlier triggers in the same transaction).
+- Async work (future/Queueable/Batch) runs in a new transaction; its success or failure does not automatically roll back the original synchronous transaction, which creates opportunities for partial commits.
+
+Example: you update an Account in a trigger and then enqueue a Queueable that updates related Contacts. If the Queueable fails, the Account update already committed with the trigger (because the original transaction completed) — that's a partial commit scenario.
+
+## Why mixed‑DML throws and how it causes partial writes
+
+Mixed‑DMLException is thrown when a single synchronous transaction performs DML on both setup objects (User, Group, GroupMember, PermissionSet, etc.) and non‑setup objects (Account, Contact, Custom objects). Salesforce blocks this to protect internal setup consistency.
+
+Key facts:
+
+- In production code, System.runAs does NOT remove mixed‑DML restrictions; only in test context does System.runAs allow mixed DML for creating Users and related setup objects.
+- Workarounds:
+  - Move the setup-object DML into an asynchronous job (Queueable/@future/Platform Event subscriber).
+  - Run the non‑setup DML asynchronously instead.
+
+Partial commit risk: splitting work across transactions is the reason partial commits happen. If transaction A commits and transaction B (queued by A) fails later, A's changes remain.
+
+## Copy‑pasteable test scenarios: reproduce and test mixed DML safely
+
+Repro: mixed DML in a single transaction (will throw MixedDMLException in normal code). The following Apex test shows both the failure scenario and the safe test pattern using System.runAs (test-only) and async workaround.
+
+```apex
+@isTest
+private class MixedDmlTest {
+    @isTest static void mixedDmlThrows() {
+        // ❌ This will throw MixedDmlException in non-test runtime if you mix setup + non-setup DML
+        Account a = new Account(Name='Acct1');
+        insert a;
+
+        User u = new User(
+            Alias='tuser',
+            Email='tuser@example.com',
+            EmailEncodingKey='UTF-8',
+            LastName='Test',
+            LanguageLocaleKey='en_US',
+            LocaleSidKey='en_US',
+            ProfileId=UserInfo.getProfileId(),
+            TimeZoneSidKey='America/Los_Angeles',
+            UserName='tuser'+Math.random()+ '@example.com'
+        );
+
+        // In production code this would throw MixedDMLException
+        // In tests System.runAs allows creating users; so this assertion is only to illustrate.
+        Test.startTest();
+        System.runAs(u) {
+            // inside System.runAs in tests, mixed DML is allowed
+        }
+        Test.stopTest();
+    }
+
+    @isTest static void asyncWorkAvoidsMixedDml() {
+        // Use Queueable to move setup DML to a separate transaction
+        Account a = new Account(Name='AsyncAcct');
+        insert a;
+
+        Test.startTest();
+        System.enqueueJob(new CreateUserQueueable());
+        Test.stopTest(); // ensures Queueable runs
+
+        // Assert the user exists after Test.stopTest()
+        Integer uCount = [SELECT count() FROM User WHERE LastName='QueueableCreated'];
+        System.assertEquals(1, uCount);
+    }
+}
+
+public class CreateUserQueueable implements Queueable {
+    public void execute(QueueableContext ctx) {
+        User u = new User(
+            Alias='quser',
+            Email='quser@example.com',
+            EmailEncodingKey='UTF-8',
+            LastName='QueueableCreated',
+            LanguageLocaleKey='en_US',
+            LocaleSidKey='en_US',
+            ProfileId=UserInfo.getProfileId(),
+            TimeZoneSidKey='America/Los_Angeles',
+            UserName='quser'+Math.random()+'@example.com'
+        );
+        insert u; // runs in separate transaction
+    }
+}
+```
+
+Notes: always use Test.startTest()/Test.stopTest() to force async jobs to run during tests and then query post‑job state.
+
+## Decision table: when to use synchronous, batch, or platform event to avoid partial commits
+
+| Need | Use synchronous | Use batch (Database.Batchable) | Use platform event / queueable | Why / tradeoffs |
+|---|---:|---:|---:|---|
+| Small, immediate update, must be atomic | ✓ |  |  | Synchronous keeps single transaction; no partial commits if all work in one transaction |
+| Large data volume or long-running operations |  | ✓ |  | Batch divides into chunks; each chunk is its own transaction (monitor failures per chunk) |
+| Need to separate setup vs non-setup DML or prevent MixedDML |  |  | ✓ | Platform events / queueables create separate transactions, avoiding mixed DML and limiting blast radius |
+| Need retry/at-least-once delivery |  |  | ✓ | Platform events and batch have retry semantics; queueable is fire-and-forget with limits |
+
+## Where to assert in unit tests and governor-limit interactions
+
+- Assert after Test.stopTest() for results of async work (Queueable/@future/Platform Event delivery).
+- For savepoint/rollback assertions, test inside the same test method (savepoint and rollback run in the same transaction).
+- Remember governor limits are per transaction: moving work to batch/queueable gives you a fresh set of limits.
+- Batch chunks each have fresh governor limits; plan stateful work accordingly.
+
+Example: to assert that a Database.rollback(savepoint) removed records, create records, set savepoint, delete some, roll back, then query to ensure records still exist — all inside one test method.
+
+## Troubleshooting checklist (quick things to run in a sandbox)
+
+- Reproduce locally: run the apex that fails inside Execute Anonymous or a test to capture the exception stack.
+- Check for MixedDMLException in the logs; if present, identify setup vs non-setup DML in the transaction.
+- If partial data appears, search for asynchronous enqueueing (Queueable, @future, PlatformEvent publish). Those create separate commits.
+- Add debug logs around Database.setSavepoint and Database.rollback to confirm savepoint scope.
+- Insert assertions in unit tests around Test.startTest() / Test.stopTest() to validate async outcomes.
+
+## Common mistakes and how to fix them
+
+- Trying to use a savepoint across async boundaries — fix: keep savepoint usage inside one transaction or move logic to a single transaction.
+- Using System.runAs in production to avoid mixed DML — fix: System.runAs only helps in tests; for production separate DML into async jobs.
+- Assuming batch.execute failures roll back the entire job — fix: each execute() chunk is independent; handle partial failures inside execute().
+- Forgetting Test.stopTest() — fix: always use Test.startTest()/Test.stopTest() to ensure queued jobs execute during tests.
+
+## FAQ
+
+### When exactly is DML committed in Apex?
+All DML is committed at the end of the current transaction. That transaction might be a UI save, a REST call, a single batch chunk, or an async job.
+
+### Do savepoints persist across Queueable/future executions?
+No. Savepoints are transaction‑local. A savepoint in one transaction cannot be used in another.
+
+### How do I test code that does setup and non‑setup DML?
+In unit tests, System.runAs allows setup-user creation. In production, move one side of the DML into an async job (Queueable, Batchable, Platform Event).
+
+### Why did part of my data save even though a later operation failed?
+Because you split work into multiple transactions (common with async jobs); earlier transactions committed successfully while later transactions failed. To avoid this, keep related DML in the same transaction where possible.
+
+### Where can I find authoritative references on transaction behavior?
+Salesforce Developer Docs provide details on Apex transactions and limits: https://developer.salesforce.com/docs
+
+For trigger design patterns and batch guidance see: [Apex Triggers: Best Practices and Common Pitfalls](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/apex-triggers-best-practices-and-common-pitfalls/index.mdx) and [Automating Processes with Apex Batch Jobs in Salesforce](synthetic://cmouqhrr10000pj0f5jewbrfy/indexed-content/salesforce-blog/posts/developer/automating-processes-with-apex-batch-jobs-in-salesforce/index.mdx).
+
+Put a short test in a sandbox now: add debug statements before and after async enqueueing, run the code, and confirm whether each logical unit ran in its own transaction by checking what committed in the DB and what failed in the async job logs.
+
